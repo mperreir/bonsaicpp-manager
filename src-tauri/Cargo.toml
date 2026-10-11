@@ -1,0 +1,39 @@
+[package]
+name = "bonsaicpp-manager"
+version = "0.7.0"
+description = "Gestionnaire Windows du backend llama.cpp (fork Bonsai) : installation, configuration dynamique, modeles Hugging Face"
+authors = ["Matthieu Perreira Da Silva"]
+edition = "2021"
+
+[lib]
+name = "bonsaicpp_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sys-locale = "0.3"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+zip = "2"
+regex = "1"
+chrono = "0.4"
+windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_System_Com", "Win32_System_Performance"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

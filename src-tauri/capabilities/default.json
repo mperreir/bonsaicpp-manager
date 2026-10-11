@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions minimales : autostart, shell ouvertures, dialogues, process.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:tray:allow-set-tooltip",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "opener:allow-open-url",
+    "opener:allow-default-urls",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "shell:allow-open",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "process:allow-restart",
+    "process:allow-exit"
+  ]
+}

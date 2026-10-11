@@ -1,0 +1,215 @@
+# AGENTS.md — Bonsai.cpp Manager
+
+Guide for AI agents (and humans) working on this repo.
+Windows app **Tauri 2 + React + TypeScript (Vite) + Rust**: installs and drives
+the `llama-server` backend from the [PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp)
+fork (Bonsai 2 models). See `README.md` for usage.
+
+## Environment (Windows machine, PowerShell 5.1)
+
+- **Node 24 via nvm-sh** (`~/.nvm`, not nvm-windows): `nvm`/`node`/`npx` are
+  **not** on the default PATH. Prefix every command:
+  `$env:PATH="C:\Users\nous\.nvm\versions\node\v24.18.0\bin;$env:PATH"`
+- **Rust**: `$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"` (`cargo 1.99`, `stable` toolchain).
+- **C++ build**: VS 2022 Build Tools + VCTools workload (required to link in debug/release).
+- PowerShell 5.1: no `head` (use `Select-Object -First N`), no `<<` heredocs,
+  `foreach` (not `for`), `select-string` ~ grep. `a.exe > f.txt` writes **UTF-16LE**.
+
+## Commands
+
+```powershell
+npm install
+npm run tauri dev      # vite :1420 + auto rebuild of the binary; closing the window = hide to tray
+npm run build          # tsc + prod vite
+cd src-tauri; cargo test --lib   # unit tests (--help parser)
+cd src-tauri; cargo check
+```
+
+Clean dev restart (the watcher doesn't always pick up `tauri.conf.json`):
+kill `tauri.js dev`, `vite.js` and `bonsaicpp-manager.exe`, then relaunch.
+A ghost tray icon after kill is normal (Explorer cache, disappears on hover).
+
+## Architecture
+
+- `src-tauri/src/`: `lib.rs` (tray + menu + single-instance + autostart + close→hide),
+  `backend.rs` (prebuilt GitHub Releases `bin/<tag>/<flavor>/`, GPU detection:
+  `nvidia-smi` then WMI names — AMD/Radeon → hip, Arc → vulkan; default persisted
+  in `bin/default.txt` and honored by `find_installed`; install stops a running
+  server first (shared `stop_server_impl`) and becomes default; delete refused
+  while running; `is_server_running` covers tracked child + adopted orphan),
+  `help_parser.rs` (`--help` parser + tests), `models.rs` (Hugging Face downloads),
+  `server_cmd.rs` (`llama-server` supervision, forced `--metrics`; `server_status`
+  **adopts** an orphan server answering on the last known port; `stop_server`
+  also kills the `llama-server.exe` orphan via taskkill after checking its name),
+  `stats.rs` (see § Stats), `state.rs` (paths + server state + last port).
+- `src/`: `App.tsx` (sidebar shell, `localStorage` presets), `lib/api.ts` (`invoke`
+  wrappers + types), `hooks/useStats.ts` (App-level polling: survives tab switches
+  and tray hiding — NEVER poll from a page),
+  `pages/` (Backend, Models, Server Simple/Expert, Stats, Logs).
+- Data: `%APPDATA%\com.bonsai.manager\` (**bundle identifier**, not product name):
+  `bin/`, `models/bonsai2-gguf/`, `logs/llama-server.log`.
+
+## Stats (rewritten 2026-10-10, 6-point user spec)
+
+- **Live**: per-slot `/slots` snapshots over a 10 s sliding window
+  (`window_rate`, needs ≥ 1 s span), summed over active slots
+  (`prefill_tps`, `decode_tps`, `None` → `--` when idle). The window
+  covers coarse batch jumps (`/slots` counters advance in bursts with
+  multi-second gaps). Last rate held while in phase (`hold_or_stale`);
+  no progress for > 15 s → `None`. Fresh tasks reset snapshots + rates.
+  Prefill end is latched per task (`prefill_over`: **decoded-token delta**,
+  never `processed == prompt_total` — this fork grows `n_prompt_tokens`
+  in stages mid-prefill): the slot flips to decode so prefill live goes
+  `--` and its average freezes instead of decaying during decode.
+  Snapshots reset at the switch so early decode isn't diluted by
+  prefill zeros; a staged boundary (`== total`, no generation yet)
+  holds the prefill display instead of flickering. Only realtime source (counters flush at
+  phase/request end with a **variable multi-second delay** — never expect a
+  synchronous value from them).
+ - **Per-poll averages**: each poll with a speed feeds backend-side `PollAvg`
+   (sum/count) — never reset, still shown when idle.
+- **Cache / spec / TTFT (0.6)**: `cache_live` = prompt-weighted mean over
+  prefill-phase slots, **frozen** while decoding (`track.cache_held`,
+  slot counters reset; cleared idle; fresh tasks never inherit),
+  per-request counts frozen in `PrevSlot.cache_final_n/_total` (feeds
+  history via `finish_sample` before the counter window). `cache_session`
+  sums coherent pairs (`session_cache`, unknowns skipped): the fork
+  counts evaluated-only in `prompt_tokens_total`, so the pair is
+  (cached, evaluated + cached) — never ratio × counter-`prompt_n`.
+  Per-request spec (`spec_drafted`/`spec_accepted`: `timings` for test
+  prompts, counter-window deltas + catch-up otherwise), session spec
+  from `spec_decode_*` counters, history Spec column, dedupe keyed on
+  speeds only. `ttft_last`/`ttft_avg`/`ttft_n` from history `prompt_ms`.
+  StatsPage: two labeled sections (live / averages-session, 5 cards
+  each, auto-fit grid), history adds Cache + TTFT + Spec columns.
+- **`/metrics` parsing**: `parse_metric` must `continue` (never `?`) on
+  mismatch — an early `?` aborted the scan so only a first-placed
+  metric ever parsed (all counters silently 0; caught by
+  `spec_counters_parse_beside_per_pos_lines`).
+- **Slots**: `active_slots[]` (`prefill` while prompt advances and no
+  generation observed, else `decode` — see `prefill_over` latch)
+  + per-slot speed; tray tooltip = active speeds (backend sums), checkbox.
+- **Context**: `ctx_used` = Σ over slots (`n_prompt_tokens` + `n_decoded`, active
+  **and** idle since the cache survives); `ctx_max` = `n_ctx` (**shared KV cache**,
+  not ×slot count).
+- **History**: stored **backend-side** (`Vec`, last 50, memory only, returned on
+  every poll) — the frontend renders `activity.history`, **no React-side
+  accumulation/dedupe** (an impure `setHistory` updater + StrictMode emptied it).
+- **Per-request speeds** (`finish_sample`): 1. **server log** (`print_timing …
+  task <id>` → `lookup_log_timings`, exact and immediate), 2. `/metrics` counters
+  over the [idle-baseline → end] window (`with_counters`, cache-excluded tokens),
+  3. phase wall time (`close_sample` with a prefill→decode switch instant).
+  `pending` catch-up (30 idle polls) when flushes land after the close;
+  stays alive until speeds, cache AND spec are all resolved
+  (`Pending::resolved`); a new task (`fresh`) replays the old window
+  once for spec only (safe attribution) before handing over. Parallel requests: `shared` flag, observed window.
+- **History duplicates**: `push_history` normalizes ms to 2 decimals and drops a
+  sample identical to the last 3 (test request seen via `timings` + slot).
+- **Windows autostart**: `get_autostart`/`set_autostart` commands (`lib.rs`,
+  `ManagerExt::autolaunch`), checkbox in the Settings tab (`SettingsPage`); the plugin is
+  configured with `--minimized` (hidden-to-tray start, handled in `setup`).
+- **Models**: `ModelsPage` takes `selected` (current preset) → "in use" badge.
+- **Backend page**: installed-backends table first (matches Models layout),
+  `BackendPage` takes `preset`/`extraArgs`/`status`/`setServer` from `App` so
+  switching default restarts a running server on the new binary with the
+  current preset (stop-only if no model configured).
+- **Logs**: one-line health (full JSON kept for diag), `.log` fitted to viewport.
+- **Release**: `npm run tauri build` (tsc + vite + **perMachine** NSIS → admin needed)
+  to `src-tauri/target/release/bundle/nsis/*.exe`; LTO release profile, long
+  compile (~10-30 min). `cargo check` is warning-free — keep it that way.
+
+## Conventions / observed pitfalls (do not reintroduce)
+
+1. **Tauri v2 = camelCase invoke args**: the macro generates `rename_all = "camelCase"`
+   (`download_url` → `downloadUrl`, `extra_args` → `extraArgs`). Nested struct
+   fields (`SimplePreset.model_path`) stay snake_case (direct serde).
+2. **`llama-server --help` format**: **column-0** options (`-t, --threads N  desc`,
+   multiple aliases, `N`/`START END`/`KEY=TYPE:VALUE,...`/`<..>`/`{a,b}`/`[a|b]` values),
+   descriptions continued on **indented lines** (incl. `(env: …)`), `----- xxx -----`
+   sections. Never treat an indented line as a section or option.
+   The parser is tested on a real excerpt + validated on a full `--help`
+   (4 sections, 251 options). `parse_help` strips a possible BOM.
+3. **Tray created in code only** (`TrayIconBuilder`): do not add `app.trayIcon`
+   to `tauri.conf.json` (double icon otherwise).
+4. **Rust `"\` at end of line eats ALL following indentation**: in multiline test
+   fixtures, use real newlines (no `\`).
+5. `cargo`/`tsc` output goes to stderr: PowerShell shows `NativeCommandError` even on
+   success — judge by `test result: ok` / `Finished`, not by pipe exit code.
+6. Frontend: no Tailwind (handmade CSS `src/styles.css`, "native utility" style,
+   light/dark via `prefers-color-scheme`). Windows case-insensitive files:
+   do not create `App.css` + `app.css` (same file on Windows).
+7. **NEVER mutate a ref/state inside a `setState` updater**: StrictMode replays
+   updaters in dev → emptied history while the backend recorded (`seenKeys`
+   inside `setHistory`, Oct 2026). Filter BEFORE, keep the updater pure.
+8. **Every dev rebuild restarts the app**: backend memory + React state wiped.
+   Do not read a counter restarting at 0 as a bug. HMR can also desync hook/page
+   (`undefined` props) → clean restart in that case.
+9. `poll_activity` takes `AppHandle` as 1st param (injected by Tauri, invisible to
+   the frontend) to resolve the log path. Frontend `invoke` unchanged.
+10. `shell` tool: commands with `$env:…` or quotes must go through a `.ps1` file
+    (via `write`) run with `powershell -NoProfile -ExecutionPolicy Bypass -File …` —
+    inline escaping breaks (e.g. `Select-String` with `|`/`\k`, `-split`/`-match`
+    with `"…"`). `Get-Content …log | Select-String`: prefer
+    `Where-Object { $_ -match '…' }` in a script, or `findstr`.
+11. **Icons**: `src-tauri/icons/icon.ico` is linked into the exe via `resource.rc`
+    generated by `tauri-build`, but the build script does **not** rerun when the
+    `.ico` changes (only `.rs` triggers it). After `npx tauri icon …`: `cargo clean -p
+    bonsaicpp-manager` to force `resource.lib` regeneration, otherwise the exe keeps
+    the old icon. Check: `[Drawing.Icon]::ExtractAssociatedIcon($exe)`.
+    The Windows icon cache may also show a stale icon (taskbar/tray).
+12. **`--help` parser**: only `N` (llama convention) yields `Int` — any other
+    uppercase value name (`TYPE`, `STRING`…) is `Text` (a number field breaks input,
+    e.g. `--cache-type-k TYPE` expects `f16`). A numeric default already decides
+    int/float when present. Bare comma-separated lowercase lists
+    (`--spec-type none,draft-simple,…,ngram-cache`) are `Enum`; uppercase
+    placeholders (`N0,N1,…`) and `<…>` patterns (`<dev1,dev2,..>`) stay `Text`.
+    Very long value lists wrap onto a column-0 continuation line starting with
+    `,` — it is appended to the pending value, not dropped (otherwise the flag
+    degrades to `Bool`).
+13. **Windows child processes must not flash a console**: every
+    `std/tokio::process::Command` (`nvidia-smi`, `powershell` WMI probe,
+    `llama-server --help`, `netstat`, `tasklist`, `taskkill`) needs
+    `creation_flags(0x08000000 /* CREATE_NO_WINDOW */)` via
+    `std::os::windows::process::CommandExt` (cfg-gated). The release binary is
+    `windows_subsystem` (no console), so any child without the flag pops a
+    visible terminal — invisible in `tauri dev` (console subsystem, inherited).
+    The `llama-server` spawn itself uses `DETACHED_PROCESS | CREATE_NO_WINDOW`.
+14. **GPU VRAM (topbar)**: `gpu::gpu_memory` command. Adapter identity + totals
+    via DXGI (in-process, all vendors incl. AMD where `rocm-smi` doesn't exist
+    on Windows); **usage via PDH `GPU Adapter Memory(*)\Dedicated Usage`**
+    (English counter names, locale-independent) — DXGI `CurrentUsage` is
+    per-process (our own ~0), NOT adapter-wide. Totals summed over adapters;
+    richest one named (WARP skipped). Polled every 5 s with `serverStatus`
+    (`App.tsx`), hidden if the query fails.
+15. **Tray icon state**: colored while the server runs, gray when stopped
+    (`tray_icon::refresh_tray_icon`, `TrayIconState`). The gray variant is
+    derived at runtime from the app icon (luma) — no second asset. Updated in
+    `start_server` / `stop_server_impl` / every `server_status` return (covers
+    crash + orphan adoption); no redundant `set_icon` (polled every 5 s).
+    State is tri-state (`None` = unknown) so the launch-time gray applies.
+16. **Server autostart at app launch**: `bonsai.autostartServer` localStorage
+    flag, checkbox in the Settings tab (`SettingsPage`), acted on once at mount
+    (`App.tsx`, `autoStarted` ref for StrictMode) — skipped if a server is
+    already running (orphan) or no model is configured.
+17. **i18n (FR default, EN)**: frontend via `react-i18next`
+    (`src/i18n/fr.json` reference, `en.json`, `index.ts`; init imported in
+    `main.tsx`). Language resolution: `localStorage "bonsai.locale"`, else
+    `navigator.language` (EN OS → EN), else FR; `<html lang>` synced.
+    Switcher in the Settings tab (`SettingsPage`, `<select>`) persists + pushes to the
+    backend (`set_app_language`, tray menu relabel). `npm run i18n:check`
+    (`scripts/i18n-check.mjs`) fails on key mismatch — run it when touching
+    strings. New language = copy `fr.json`, register in `resources` +
+    `supportedLngs` + `LOCALES`. Number/date formatting via
+    `numLocale()` (`api.ts`), never hardcoded `fr-FR`. French uses proper
+    accents. Backend (`src-tauri/src/locale.rs`): `Lang`/`AppLang` state,
+    `tray_labels`, `Msg` table for every user-facing error (technical `{e}`
+    suffixes stay raw); commands take injected `AppHandle` to resolve the
+    lang (invisible to the frontend); persisted `lang.txt`, else OS locale
+    (`sys-locale`) at startup. Tray tooltip is frontend-built (`useStats`):
+    decode active → speeds, else `tray.ready` ("Bonsai prêt").
+18. **Settings tab** (`SettingsPage`): centralizes all user preferences —
+    app autostart at login, server autostart at launch, language (`<select>`
+    over `LOCALES`, extensible), stats polling interval (`bonsai.pollMs`,
+    idle only; 0.5 s while generating), tray tooltip toggle (`bonsai.tooltip`,
+    persisted). Nothing settings-like lives in the sidebar footer (removed),
+    the Server tab, or the Stats tab.
