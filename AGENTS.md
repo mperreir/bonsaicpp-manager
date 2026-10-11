@@ -213,3 +213,6 @@ A ghost tray icon after kill is normal (Explorer cache, disappears on hover).
     idle only; 0.5 s while generating), tray tooltip toggle (`bonsai.tooltip`,
     persisted). Nothing settings-like lives in the sidebar footer (removed),
     the Server tab, or the Stats tab.
+19. **Commits**: messages in English, with an `openchamber` co-author trailer:
+    `Co-authored-by: OpenChamber`. Applies from `a00f998` onward (earlier
+    commits predate the rule and are left untouched).
