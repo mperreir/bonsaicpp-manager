@@ -57,3 +57,18 @@ npm run tauri build
 cd src-tauri
 cargo test   # --help parser (tolerant snapshot)
 ```
+
+## Release
+
+Push a tag `vX.Y.Z` (matching `version` in `tauri.conf.json` +
+`package.json` + `Cargo.toml`): the `Release` workflow builds the NSIS
+installer on `windows-latest` and publishes it on the Releases page.
+
+```powershell
+git tag v0.7.0
+git push origin v0.7.0
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

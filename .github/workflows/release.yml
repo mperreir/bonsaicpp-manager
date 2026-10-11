@@ -1,0 +1,47 @@
+# Builds the NSIS installer and publishes a GitHub release.
+#
+# Trigger: pushing a tag `vX.Y.Z` (must match `version` X.Y.Z in
+# `src-tauri/tauri.conf.json` + `package.json` + `src-tauri/Cargo.toml`).
+# Example: `git tag v0.7.0; git push origin v0.7.0`.
+# The release (with the `-setup.exe` attached) appears on the repo's
+# Releases page once the build finishes (~10-30 min, LTO release profile).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+      - run: npm run i18n:check
+
+      # Runs `npm run build` (tsc + vite) then `tauri build`, uploads the
+      # NSIS bundle and creates the GitHub release for the pushed tag.
+      # No updater artifacts: the app has no updater plugin, only `-setup.exe`.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Bonsai.cpp Manager ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
