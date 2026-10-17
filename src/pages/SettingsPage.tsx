@@ -95,7 +95,7 @@ export default function SettingsPage({
         </label>
       </section>
 
-      {router.models.length > 0 && (
+      {router.models.some((m) => m.routed) && (
         <section className="card">
           <h3>{t("router.routing")}</h3>
           <label className="row">{t("router.modelsMax")}

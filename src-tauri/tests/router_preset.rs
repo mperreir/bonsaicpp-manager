@@ -119,8 +119,10 @@ fn generated_ini_is_accepted_by_llama_server() {
         ("n-gpu-layers".into(), "0".into()),
     ];
     let mut small = RouterModel::new("small", model.to_string_lossy().to_string());
+    small.routed = true;
     small.overrides = vec![("ctx-size".into(), "1024".into())];
     let mut pre = RouterModel::new("preloaded", model.to_string_lossy().to_string());
+    pre.routed = true;
     pre.load_on_startup = true;
     cfg.models = vec![small, pre];
 
@@ -191,6 +193,18 @@ fn generated_ini_is_accepted_by_llama_server() {
         registry.contains("loading") || registry.contains("loaded"),
         "preloaded section did not start loading:\n{registry}"
     );
+
+    // An un-routed model must stay out of the preset entirely.
+    let mut cfg2 = cfg.clone();
+    cfg2.models[0].routed = false;
+    let ini2 = std::env::temp_dir().join(format!("{stem}-unrouted.ini"));
+    std::fs::write(&ini2, cfg2.render_ini()).expect("write ini 2");
+    assert!(
+        !cfg2.render_ini().contains("[small]"),
+        "an un-routed model leaked into the preset:\n{}",
+        cfg2.render_ini()
+    );
+    let _ = std::fs::remove_file(&ini2);
 
     let _ = std::fs::remove_file(&ini);
     let _ = std::fs::remove_file(&log);

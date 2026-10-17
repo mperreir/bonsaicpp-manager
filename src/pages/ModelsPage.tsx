@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { api, fmtBytes, DEFAULT_REPO, type LocalModel, type RemoteFile, type RouterConfig } from "../lib/api";
+import { api, fmtBytes, DEFAULT_REPO, type LocalModel, type RemoteFile } from "../lib/api";
 
-export default function ModelsPage({ selected, router, onSelect, onAddToRouter }: { selected: string; router: RouterConfig; onSelect: (path: string) => void; onAddToRouter: (file: string) => void }) {
-  /// Is this GGUF registered in the router, under which alias?
-  const inRouter = (file: string) => router.models.find((m) => m.model_path === file)?.alias;
+export default function ModelsPage({ selected, hasRouter, onSelect }: { selected: string; hasRouter: boolean; onSelect: (path: string) => void }) {
   const [local, setLocal] = useState<LocalModel[]>([]);
   const [repo, setRepo] = useState(DEFAULT_REPO);
   const [token, setToken] = useState("");
@@ -107,13 +105,15 @@ export default function ModelsPage({ selected, router, onSelect, onAddToRouter }
             <tbody>
               {local.map((m) => (
                 <tr key={m.file} className={m.file === selected ? "current" : ""}>
-                  <td className="mono">{m.file.split(/[/\\]/).pop()}{m.file === selected && <span className="badge ok">{t("models.badgeUsed")}</span>}{inRouter(m.file) && <span className="badge">{inRouter(m.file)}</span>}</td>
+                  <td className="mono">{m.file.split(/[/\\]/).pop()}{m.file === selected && !hasRouter && <span className="badge ok">{t("models.badgeUsed")}</span>}</td>
                   <td><code>{m.quant}</code></td>
                   <td>{fmtBytes(m.size_bytes)}</td>
                   <td className="cell-actions">
                     <div className="row">
-                      {!inRouter(m.file) && <button onClick={() => onAddToRouter(m.file)} title={t("models.addRouterTitle")}>{t("models.addRouter")}</button>}
-                      <button onClick={() => onSelect(m.file)}>{t("models.use")}</button>
+                      {/* In router mode the client picks the model per
+                          request: there is nothing to "use" from here,
+                          exposure is managed in the Server tab. */}
+                      {!hasRouter && <button onClick={() => onSelect(m.file)}>{t("models.use")}</button>}
                       <button onClick={() => remove(m.file)}>{t("common.delete")}</button>
                     </div>
                   </td>

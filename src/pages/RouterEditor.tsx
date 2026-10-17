@@ -36,7 +36,6 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
   const { t } = useTranslation();
   const [schema, setSchema] = useState<HelpSchema | null>(null);
   const [local, setLocal] = useState<LocalModel[]>([]);
-  const [pick, setPick] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [errs, setErrs] = useState<IniError[]>([]);
   const [busy, setBusy] = useState(false);
@@ -74,21 +73,25 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
     }
   };
 
+  const routedCount = router.models.filter((m) => m.routed).length;
+
   const patchModel = (alias: string, patch: Partial<RouterModel>) =>
     apply({ ...router, models: router.models.map((m) => (m.alias === alias ? { ...m, ...patch } : m)) });
 
-  const addModel = (file: string) => {
-    if (!file) return;
-    let alias = suggestAlias(file);
-    // Unique alias: it is the INI section name and the API model name.
+  /// Ticking a model publishes it under its alias; unticking keeps the
+  /// alias and the overrides so re-exposing restores them.
+  const setRouted = (modelPath: string, routed: boolean) => {
+    const known = router.models.find((m) => m.model_path === modelPath);
+    if (known) {
+      apply({ ...router, models: router.models.map((m) => (m.model_path === modelPath ? { ...m, routed } : m)) });
+      return;
+    }
+    // Not seen yet (model downloaded before this config): create the entry.
+    let alias = suggestAlias(modelPath);
     let n = 2;
-    while (router.models.some((m) => m.alias === alias)) alias = `${suggestAlias(file)}-${n++}`;
-    apply({
-      ...router,
-      models: [...router.models, { alias, model_path: file, overrides: [], load_on_startup: false }],
-    });
-    setEditing(alias);
-    setPick("");
+    while (router.models.some((m) => m.alias === alias)) alias = `${suggestAlias(modelPath)}-${n++}`;
+    const created: RouterModel = { alias, model_path: modelPath, routed, overrides: [], load_on_startup: false };
+    apply({ ...router, models: [...router.models, created] });
   };
 
   const setPair = (pairs: [string, string][], key: string, value: string): [string, string][] => {
@@ -186,63 +189,84 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
       )}
 
       {/* --- global [*] section -------------------------------------- */}
-      <details open={!router.models.length}>
+      <details open={!routedCount}>
         <summary>{t("router.globals")}</summary>
         <p className="muted small">{t("router.globalsHelp")}</p>
         {overrideRows(router.global, (p) => apply({ ...router, global: p }))}
         <div className="row">{picker(router.global, (p) => apply({ ...router, global: p }))}</div>
       </details>
 
-      {/* --- one section per model ------------------------------------ */}
+      {/* --- exposure: every downloaded model, ticked to publish ------- */}
       <div className="row">
-        <h3>{t("router.models", { n: router.models.length })}</h3>
+        <h3>{t("router.models", { n: routedCount })}</h3>
         <span className="spacer" />
-        <select value={pick} onChange={(e) => addModel(e.target.value)} disabled={busy || local.length === 0}>
-          <option value="">{t("router.addModel")}</option>
-          {local.map((m) => (
-            <option key={m.file} value={m.file}>{suggestAlias(m.file)} — {m.file.split(/[\\/]/).pop()}</option>
-          ))}
-        </select>
+        {busy && <span className="muted small">{t("router.saving")}</span>}
       </div>
+      <p className="muted small">{t("router.modelsHelp")}</p>
 
-      {router.models.length === 0 && <p className="muted small">{t("router.noModel")}</p>}
       {local.length === 0 && <p className="muted small">{t("router.noLocal")}</p>}
 
-      {router.models.map((m) => (
-        <div key={m.alias} className="router-model">
-          <div className="row">
-            <strong className="mono">{m.alias}</strong>
-            <span className="muted small mono ellipsis" title={m.model_path}>
-              {m.model_path.split(/[\\/]/).pop()}
-            </span>
-            <span className="spacer" />
-            <label className="row small">
-              <input
-                type="checkbox"
-                checked={m.load_on_startup}
-                onChange={(e) => patchModel(m.alias, { load_on_startup: e.target.checked })}
-              />
-              {t("router.loadOnStartup")}
-            </label>
-            <button onClick={() => apply({ ...router, models: router.models.filter((x) => x.alias !== m.alias) })}>
-              {t("common.delete")}
-            </button>
-          </div>
-          {editing === m.alias ? (
-            <>
-              {overrideRows(m.overrides, (p) => patchModel(m.alias, { overrides: p }))}
-              <div className="row">
-                {picker(m.overrides, (p) => patchModel(m.alias, { overrides: p }))}
-                <button onClick={() => setEditing(null)}>{t("router.done")}</button>
-              </div>
-            </>
-          ) : (
+      {local.map((file) => {
+        const entry = router.models.find((m) => m.model_path === file.file);
+        const on = entry?.routed ?? false;
+        return (
+          <div key={file.file} className="router-model">
             <div className="row">
-              <button onClick={() => setEditing(m.alias)}>{t("router.params", { n: m.overrides.length })}</button>
+              <label className="row">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  disabled={busy}
+                  onChange={(e) => setRouted(file.file, e.target.checked)}
+                />
+                {on && entry ? (
+                  <>
+                    <input
+                      className="mono"
+                      value={entry.alias}
+                      title={t("router.aliasTitle")}
+                      onChange={(e) => patchModel(entry.alias, { alias: e.target.value })}
+                    />
+                    <span className="muted small mono ellipsis" title={file.file}>
+                      {file.file.split(/[\\/]/).pop()}
+                    </span>
+                  </>
+                ) : (
+                  <span className="mono">{file.file.split(/[\\/]/).pop()}</span>
+                )}
+              </label>
+              <span className="spacer" />
+              {on && entry && (
+                <>
+                  <label className="row small">
+                    <input
+                      type="checkbox"
+                      checked={entry.load_on_startup}
+                      onChange={(e) => patchModel(entry.alias, { load_on_startup: e.target.checked })}
+                    />
+                    {t("router.loadOnStartup")}
+                  </label>
+                  {editing === entry.alias ? (
+                    <button onClick={() => setEditing(null)}>{t("router.done")}</button>
+                  ) : (
+                    <button onClick={() => setEditing(entry.alias)}>
+                      {t("router.params", { n: entry.overrides.length })}
+                    </button>
+                  )}
+                </>
+              )}
             </div>
-          )}
-        </div>
-      ))}
+            {on && entry && editing === entry.alias && (
+              <>
+                {overrideRows(entry.overrides, (p) => patchModel(entry.alias, { overrides: p }))}
+                <div className="row">
+                  {picker(entry.overrides, (p) => patchModel(entry.alias, { overrides: p }))}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })}
       {schema && <p className="muted small">{t("router.optionsCount", { n: options.length })}</p>}
     </section>
   );

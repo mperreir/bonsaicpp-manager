@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import i18n from "./i18n";
-import { api, EMPTY_ROUTER, fmtBytes, serverHost, suggestAlias, type GpuMemory, type IniError, type RouterConfig, type ServerStatus, type SimplePreset } from "./lib/api";
+import { api, EMPTY_ROUTER, fmtBytes, serverHost, type GpuMemory, type IniError, type RouterConfig, type ServerStatus, type SimplePreset } from "./lib/api";
 import BackendPage from "./pages/BackendPage";
 import ModelsPage from "./pages/ModelsPage";
 import ServerPage from "./pages/ServerPage";
@@ -118,17 +118,6 @@ export default function App() {
       /* ignore */
     }
   };
-  /// Register a downloaded GGUF in the router from the Models tab.
-  const addToRouter = async (file: string) => {
-    let alias = suggestAlias(file);
-    let n = 2;
-    while (router.models.some((m) => m.alias === alias)) alias = `${suggestAlias(file)}-${n++}`;
-    const errs = await saveRouter({
-      ...router,
-      models: [...router.models, { alias, model_path: file, overrides: [], load_on_startup: false }],
-    });
-    if (errs.length === 0) setTab("serveur");
-  };
 
   const stats = useStats(status);
   const [autostart, setAutostartState] = useState<boolean | null>(null);
@@ -188,7 +177,7 @@ export default function App() {
   const toggleServer = async () => {
     if (status.running) {
       setStatus(await api.stopServer());
-    } else if (router.models.length > 0) {
+    } else if (hasRouter) {
       // Router mode: nothing to load, models come with the API calls.
       setStatus(await api.startServer(preset, extraArgs, router));
     } else if (preset.model_path) {
@@ -197,7 +186,7 @@ export default function App() {
       setTab("modeles");
     }
   };
-  const hasRouter = router.models.length > 0;
+  const hasRouter = router.models.some((m) => m.routed);
 
   const openHost = preset.host === "0.0.0.0" ? "localhost" : preset.host;
   const serverUrl =
@@ -252,7 +241,7 @@ export default function App() {
         </header>
         <main className="content">
           {tab === "backend" && <BackendPage preset={preset} extraArgs={extraArgs} status={status} setServer={setStatus} />}
-          {tab === "modeles" && <ModelsPage selected={preset.model_path} router={router} onAddToRouter={addToRouter} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
+          {tab === "modeles" && <ModelsPage selected={preset.model_path} hasRouter={hasRouter} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
           {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} router={router} saveRouter={saveRouter} setRouter={setRouter} />}
           {tab === "stats" && <StatsPage status={status} stats={stats} />}
           {tab === "logs" && <LogsPage status={status} />}

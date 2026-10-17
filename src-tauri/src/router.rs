@@ -71,18 +71,28 @@ pub fn is_preset_only(key: &str) -> bool {
     k == LOAD_ON_STARTUP || PRESET_ONLY.iter().any(|p| ini_key(p) == k)
 }
 
-/// One entry of the router registry.
+/// One model known to the manager. Every downloaded GGUF has an entry:
+/// `routed` decides whether it is published in the preset (visible to API
+/// clients) or kept aside (its alias/overrides survive an uncheck, so
+/// re-exposing a model restores its previous settings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterModel {
     /// Short name used by API clients in the `model` field.
     pub alias: String,
     /// Absolute path of the GGUF (also the INI section name source).
     pub model_path: String,
+    /// Expose this model through the router.
+    #[serde(default = "default_true")]
+    pub routed: bool,
     /// Per-model overrides, empty value = bare flag (`jinja = true`).
     pub overrides: Vec<(String, String)>,
     /// Load this model when the server starts (default: no).
     #[serde(default)]
     pub load_on_startup: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl RouterModel {
@@ -91,6 +101,7 @@ impl RouterModel {
         Self {
             alias: alias.into(),
             model_path: model_path.into(),
+            routed: true,
             overrides: Vec::new(),
             load_on_startup: false,
         }
@@ -132,9 +143,14 @@ impl Default for RouterConfig {
 }
 
 impl RouterConfig {
-    /// Router mode is active as soon as one model is registered.
+    /// Router mode is active as soon as one model is *routed*.
     pub fn is_router(&self) -> bool {
-        !self.models.is_empty()
+        self.models.iter().any(|m| m.routed)
+    }
+
+    /// The models actually published in the preset.
+    pub fn routed(&self) -> impl Iterator<Item = &RouterModel> {
+        self.models.iter().filter(|m| m.routed)
     }
 
     #[allow(dead_code)] // used by tests
@@ -142,9 +158,40 @@ impl RouterConfig {
         self.models.iter().find(|m| m.alias == alias)
     }
 
+    /// Reconcile the registry with the GGUF files on disk: every local file
+    /// gets an entry (un-routed by default is *not* applied — a model the
+    /// user had exposed stays exposed), and entries whose file disappeared
+    /// are dropped. `alias_of` proposes the initial alias.
+    pub fn sync_with(&self, local: &[String], mut alias_of: impl FnMut(&str) -> String) -> RouterConfig {
+        let mut out = self.clone();
+        // Drop vanished files.
+        out.models.retain(|m| local.iter().any(|p| *p == m.model_path));
+        // Add the new ones, with a non-conflicting alias.
+        for path in local {
+            if out.models.iter().any(|m| m.model_path == *path) {
+                continue;
+            }
+            let base = alias_of(path);
+            let mut alias = base.clone();
+            let mut n = 2;
+            while out.models.iter().any(|m| m.alias == alias) {
+                alias = format!("{base}-{n}");
+                n += 1;
+            }
+            out.models.push(RouterModel {
+                alias,
+                model_path: path.clone(),
+                routed: false,
+                overrides: Vec::new(),
+                load_on_startup: false,
+            });
+        }
+        out
+    }
+
     /// Serialize to the INI consumed by `--models-preset`.
-    /// Deterministic ordering (sorted keys, registry order) so the file
-    /// is stable across writes and easy to diff.
+    /// Only routed models get a section; ordering is deterministic (sorted
+    /// keys, registry order) so the file is stable across writes.
     pub fn render_ini(&self) -> String {
         let mut out = String::from("version = 1\n");
 
@@ -156,7 +203,7 @@ impl RouterConfig {
             }
         }
 
-        for m in &self.models {
+        for m in self.routed() {
             out.push_str(&format!(
                 "\n; {}\n[{}]\nmodel = {}\n",
                 m.alias, m.alias, m.model_path
@@ -234,7 +281,8 @@ pub fn validate(cfg: &RouterConfig, schema: &HelpSchema) -> Vec<IniError> {
         }
     };
     check(&cfg.global, "*");
-    for m in &cfg.models {
+    // Un-routed models never reach the preset: their overrides are inert.
+    for m in cfg.routed() {
         check(&m.overrides, &m.alias);
     }
     errs
@@ -332,7 +380,7 @@ pub async fn set_router_config(
     // Structural checks first (no schema needed).
     let mut errs: Vec<IniError> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
-    for m in &config.models {
+    for m in config.routed() {
         if let Some(why) = alias_error(&m.alias) {
             errs.push(IniError {
                 scope: m.alias.clone(),
@@ -551,6 +599,105 @@ mod tests {
         assert!(cfg.is_router());
         assert!(cfg.find("a").is_some());
         assert!(cfg.find("zzz").is_none());
+    }
+
+    #[test]
+    fn unrouted_models_are_absent_from_the_ini() {
+        let mut cfg = RouterConfig::default();
+        let mut shown = RouterModel::new("shown", "shown.gguf");
+        shown.overrides = vec![("ctx-size".into(), "8192".into())];
+        let mut hidden = RouterModel::new("hidden", "hidden.gguf");
+        hidden.routed = false;
+        hidden.overrides = vec![("ctx-size".into(), "4096".into())];
+        cfg.models = vec![shown, hidden];
+
+        let ini = cfg.render_ini();
+        assert!(ini.contains("[shown]"));
+        assert!(!ini.contains("[hidden]"));
+        assert!(!ini.contains("4096"));
+        assert_eq!(cfg.routed().count(), 1);
+    }
+
+    #[test]
+    fn unrouted_models_are_not_validated() {
+        // An un-routed model's overrides never reach the preset, so a bad
+        // key there must not block saving (it would only bite later, once
+        // the user ticks the box — and validate() catches it then).
+        let mut cfg = RouterConfig::default();
+        let mut hidden = RouterModel::new("hidden", "hidden.gguf");
+        hidden.routed = false;
+        hidden.overrides = vec![("bogus-key".into(), "1".into())];
+        cfg.models = vec![hidden];
+        assert!(validate(&cfg, &schema()).is_empty());
+    }
+
+    #[test]
+    fn sync_adds_new_files_as_unrouted_and_drops_vanished_ones() {
+        let mut cfg = RouterConfig::default();
+        cfg.models = vec![RouterModel::new("old", "old.gguf")];
+
+        let synced = cfg.sync_with(
+            &["new.gguf".to_string(), "old.gguf".to_string()],
+            |p| p.trim_end_matches(".gguf").to_string(),
+        );
+        // The vanished file is gone; the exposed one keeps its alias and
+        // stays exposed; the newly discovered one is listed but *not*
+        // exposed (adding a model must never publish it silently).
+        assert_eq!(synced.models.len(), 2);
+        assert!(synced.find("old").unwrap().routed);
+        assert!(!synced.find("new").unwrap().routed);
+        assert!(synced.is_router());
+        assert!(!synced.render_ini().contains("[new]"));
+    }
+
+    #[test]
+    fn sync_on_a_fresh_config_exposes_nothing() {
+        let cfg = RouterConfig::default();
+        let synced = cfg.sync_with(
+            &["a.gguf".to_string(), "b.gguf".to_string()],
+            |p| p.trim_end_matches(".gguf").to_string(),
+        );
+        assert_eq!(synced.models.len(), 2);
+        assert!(!synced.is_router());
+        // Only `version = 1` then: an empty preset, nothing published.
+        assert_eq!(synced.render_ini().trim(), "version = 1");
+    }
+
+    #[test]
+    fn sync_never_duplicates_an_alias() {
+        // Two files whose basename-derived alias collides.
+        let cfg = RouterConfig::default();
+        let synced = cfg.sync_with(&["a.gguf".to_string(), "b/a.gguf".to_string()], |p| {
+            p.rsplit('/')
+                .next()
+                .unwrap_or(p)
+                .trim_end_matches(".gguf")
+                .to_string()
+        });
+        let aliases: Vec<&str> = synced.models.iter().map(|m| m.alias.as_str()).collect();
+        assert_eq!(aliases.len(), 2);
+        for (i, a) in aliases.iter().enumerate() {
+            assert!(
+                !aliases[i + 1..].contains(a),
+                "duplicate alias {a} in {aliases:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_preserves_overrides_across_uncheck_check() {
+        let mut cfg = RouterConfig::default();
+        let mut m = RouterModel::new("a", "a.gguf");
+        m.overrides = vec![("ctx-size".into(), "16384".into())];
+        cfg.models = vec![m];
+
+        let unchecked = cfg.sync_with(&["a.gguf".to_string()], |p| p.to_string());
+        let mut next = unchecked.clone();
+        next.models[0].routed = false;
+        // Unchecking then re-checking keeps the alias and the overrides.
+        next.models[0].routed = true;
+        assert_eq!(next.models[0].overrides, vec![("ctx-size".to_string(), "16384".to_string())]);
+        assert!(next.render_ini().contains("ctx-size = 16384"));
     }
 
     #[test]

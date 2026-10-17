@@ -112,7 +112,9 @@ table.tbl tr.modified td:first-child { font-weight: 600; }
 table.tbl tr.current td { font-weight: 600; }
 table.tbl tr.current td:first-child { border-left: 3px solid var(--ok); }
 table.tbl td.cell-actions { text-align: right; vertical-align: middle; white-space: nowrap; }
-table.tbl td.cell-actions .row { justify-content: flex-end; margin: 0; }
+/* Actions stay side by side: the column may be squeezed by the table, and
+   the inherited wrap would drop the second button on its own line. */
+table.tbl td.cell-actions .row { justify-content: flex-end; margin: 0; flex-wrap: nowrap; }
 table.kv td { padding: 3px 10px 3px 0; }
 table.kv td:first-child { color: var(--muted); white-space: nowrap; }
 .muted { color: var(--muted); }

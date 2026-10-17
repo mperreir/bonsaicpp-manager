@@ -172,10 +172,12 @@ export interface TimingSample {
   spec_accepted: number | null;
 }
 
-/// One model registered in the router (an INI section of the preset).
+/// One model known to the manager. Every downloaded GGUF has an entry:
+/// `routed` decides whether it is published in the preset.
 export interface RouterModel {
   alias: string;
   model_path: string;
+  routed: boolean;
   /// Per-model overrides, `[key, value]` pairs (empty value = bare flag).
   overrides: [string, string][];
   load_on_startup: boolean;
