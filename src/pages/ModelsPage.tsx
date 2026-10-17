@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { api, fmtBytes, DEFAULT_REPO, type LocalModel, type RemoteFile } from "../lib/api";
+import { api, fmtBytes, DEFAULT_REPO, type LocalModel, type RemoteFile, type RouterConfig } from "../lib/api";
 
-export default function ModelsPage({ selected, onSelect }: { selected: string; onSelect: (path: string) => void }) {
+export default function ModelsPage({ selected, router, onSelect, onAddToRouter }: { selected: string; router: RouterConfig; onSelect: (path: string) => void; onAddToRouter: (file: string) => void }) {
+  /// Is this GGUF registered in the router, under which alias?
+  const inRouter = (file: string) => router.models.find((m) => m.model_path === file)?.alias;
   const [local, setLocal] = useState<LocalModel[]>([]);
   const [repo, setRepo] = useState(DEFAULT_REPO);
   const [token, setToken] = useState("");
@@ -105,11 +107,12 @@ export default function ModelsPage({ selected, onSelect }: { selected: string; o
             <tbody>
               {local.map((m) => (
                 <tr key={m.file} className={m.file === selected ? "current" : ""}>
-                  <td className="mono">{m.file.split(/[/\\]/).pop()}{m.file === selected && <span className="badge ok">{t("models.badgeUsed")}</span>}</td>
+                  <td className="mono">{m.file.split(/[/\\]/).pop()}{m.file === selected && <span className="badge ok">{t("models.badgeUsed")}</span>}{inRouter(m.file) && <span className="badge">{inRouter(m.file)}</span>}</td>
                   <td><code>{m.quant}</code></td>
                   <td>{fmtBytes(m.size_bytes)}</td>
                   <td className="cell-actions">
                     <div className="row">
+                      {!inRouter(m.file) && <button onClick={() => onAddToRouter(m.file)} title={t("models.addRouterTitle")}>{t("models.addRouter")}</button>}
                       <button onClick={() => onSelect(m.file)}>{t("models.use")}</button>
                       <button onClick={() => remove(m.file)}>{t("common.delete")}</button>
                     </div>

@@ -1,6 +1,6 @@
 [package]
 name = "bonsaicpp-manager"
-version = "0.7.0"
+version = "0.8.0"
 description = "Gestionnaire Windows du backend llama.cpp (fork Bonsai) : installation, configuration dynamique, modeles Hugging Face"
 authors = ["Matthieu Perreira Da Silva"]
 edition = "2021"

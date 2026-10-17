@@ -1,4 +1,4 @@
-﻿//! Prefill / decode statistics (rewritten version, simple).
+//! Prefill / decode statistics (rewritten version, simple).
 //!
 //! Principles:
 //! - live prefill/decode t/s is a sliding-window rate (per-slot `/slots`
@@ -32,6 +32,10 @@ pub struct PromptMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingSample {
     pub at: String,
+    /// Router alias of the model that served the request. `None` in
+    /// single-model mode (the legacy key).
+    #[serde(default)]
+    pub model: Option<String>,
     pub prompt_n: Option<u64>,
     pub prompt_ms: Option<f64>,
     pub prompt_tps: Option<f64>,
@@ -51,13 +55,19 @@ pub struct TimingSample {
 
 #[derive(Default)]
 pub struct StatsState {
-    /// Averages over polls (memory only).
-    pub avg: Mutex<PollAvg>,
-    /// Per-request history (memory only, last 50).
+    /// Averages over polls, per model (memory only).
+    pub avg: Mutex<HashMap<String, PollAvg>>,
+    /// Per-request history (memory only, last 50), each row tagged with
+    /// the model that served it.
     pub hist: Mutex<Vec<TimingSample>>,
-    /// Slot tracking between two polls.
-    pub track: Mutex<SimpleTrack>,
+    /// Slot tracking between two polls, per model: the router can have
+    /// several models loaded at once, each with its own slots, its own
+    /// counters and its own request lifecycle.
+    pub track: Mutex<HashMap<String, SimpleTrack>>,
 }
+
+/// Track key of the single-model (non-router) mode.
+pub const SINGLE_MODEL_KEY: &str = "";
 
 /// Sums for averages over reads (polls).
 #[derive(Default, Clone, Copy)]
@@ -309,29 +319,35 @@ fn r2(v: f64) -> f64 {
 /// skipping duplicates: a test request is seen twice (its direct
 /// `timings` + its slot tracking), with the same numbers.
 fn push_history(state: &StatsState, mut s: TimingSample) {
+    if let Ok(mut h) = state.hist.lock() {
+        push_history_into(&mut h, &mut s);
+    }
+}
+
+/// Same, on an already-locked history (used by the per-model poll loop,
+/// which holds the lock for its whole synchronous section).
+fn push_history_into(h: &mut Vec<TimingSample>, s: &mut TimingSample) {
     if let Some(ms) = s.prompt_ms {
         s.prompt_ms = Some(r2(ms));
     }
     if let Some(ms) = s.predicted_ms {
         s.predicted_ms = Some(r2(ms));
     }
-    if let Ok(mut h) = state.hist.lock() {
-        // Dedupe on speeds only: cache/spec ride along on whichever
-        // sighting wins (counter-window vs exact `timings` values may
-        // differ slightly with flush delays — keying on them would
-        // double-list test requests).
-        let dup = h.iter().rev().take(3).any(|e| {
-            e.prompt_n == s.prompt_n
-                && e.prompt_ms == s.prompt_ms
-                && e.predicted_n == s.predicted_n
-                && e.predicted_ms == s.predicted_ms
-        });
-        if !dup {
-            h.push(s);
-            if h.len() > 50 {
-                let drop = h.len() - 50;
-                h.drain(0..drop);
-            }
+    // Dedupe on speeds only: cache/spec ride along on whichever
+    // sighting wins (counter-window vs exact `timings` values may
+    // differ slightly with flush delays — keying on them would
+    // double-list test requests).
+    let dup = h.iter().rev().take(3).any(|e| {
+        e.prompt_n == s.prompt_n
+            && e.prompt_ms == s.prompt_ms
+            && e.predicted_n == s.predicted_n
+            && e.predicted_ms == s.predicted_ms
+    });
+    if !dup {
+        h.push(s.clone());
+        if h.len() > 50 {
+            let drop = h.len() - 50;
+            h.drain(0..drop);
         }
     }
 }
@@ -380,6 +396,7 @@ fn close_sample(p: &PrevSlot, close: std::time::Instant, cur_processed: u64, cur
     };
     TimingSample {
         at: chrono::Local::now().to_rfc3339(),
+        model: None,
         prompt_n: Some(pn),
         prompt_ms,
         prompt_tps,
@@ -401,7 +418,17 @@ fn has_speeds(s: &TimingSample) -> bool {
 /// each request (`slot print_timing ... task <id> ...`):
 /// (prompt_n, prompt_ms, predicted_n, predicted_ms). The log is the only
 /// exact and immediate source (/metrics counters flush late).
-fn lookup_log_timings(log_path: &std::path::Path, task: u64) -> Option<(u64, f64, u64, f64)> {
+///
+/// In router mode every model runs in its own instance process, and task
+/// ids restart per instance — `task 5` exists once per loaded model. The
+/// instance prefix `[<port>]` that llama.cpp puts on each log line is
+/// therefore **required** to attribute a line to the right model
+/// (`port` = the instance port of the model, see `parse_model_ports`).
+fn lookup_log_timings(
+    log_path: &std::path::Path,
+    task: u64,
+    port: Option<u16>,
+) -> Option<(u64, f64, u64, f64)> {
     let bytes = std::fs::read(log_path).ok()?;
     let tail = if bytes.len() > 262144 {
         &bytes[bytes.len() - 262144..]
@@ -410,11 +437,19 @@ fn lookup_log_timings(log_path: &std::path::Path, task: u64) -> Option<(u64, f64
     };
     let text = String::from_utf8_lossy(tail);
     let key = format!("task {task} |");
+    let prefix = port.map(|p| format!("[{p}]"));
     let mut prompt: Option<(u64, f64)> = None;
     let mut gen: Option<(u64, f64)> = None;
     for line in text.lines() {
         if !line.contains("print_timing") || !line.contains(&key) {
             continue;
+        }
+        // Instance attribution: the line must come from this model's
+        // instance process.
+        if let Some(pfx) = &prefix {
+            if !line.starts_with(pfx.as_str()) {
+                continue;
+            }
         }
         // `... prompt eval time =     139.31 ms /     4 tokens`
         // `...        eval time =     933.36 ms /    30 tokens`
@@ -432,6 +467,25 @@ fn lookup_log_timings(log_path: &std::path::Path, task: u64) -> Option<(u64, f64
         (Some((pn, pms)), Some((dn, dms))) => Some((pn, pms, dn, dms)),
         _ => None,
     }
+}
+
+/// alias -> instance port, from the router's own log lines:
+/// `srv  proxy_reques: proxying request to model <alias> on port <p>`.
+/// This is what lets `lookup_log_timings` attribute a `print_timing` line
+/// to the right model (task ids restart in every instance).
+/// Pure parser, tested.
+pub(crate) fn parse_model_ports(log_text: &str) -> HashMap<String, u16> {
+    let mut out: HashMap<String, u16> = HashMap::new();
+    for line in log_text.lines() {
+        if let Some(rest) = line.split_once("proxying request to model ") {
+            if let Some((alias, tail)) = rest.1.split_once(" on port ") {
+                if let Ok(p) = tail.trim().parse::<u16>() {
+                    out.insert(alias.trim().to_string(), p);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `139.31 ms / 4 tokens` -> (ms, n).
@@ -465,12 +519,13 @@ fn finish_sample(
     log_path: Option<&std::path::Path>,
     win_start: Option<Ctr>,
     ctr_now: Ctr,
+    port: Option<u16>,
 ) -> (TimingSample, bool, bool) {
     let mut s = close_sample(p, close, cur_processed, cur_decoded);
     let mut pre_ok = false;
     let mut dec_ok = false;
     if let (Some(tid), Some(lp)) = (p.task, log_path) {
-        if let Some((pn, pms, dn, dms)) = lookup_log_timings(lp, tid) {
+        if let Some((pn, pms, dn, dms)) = lookup_log_timings(lp, tid, port) {
             s.prompt_n = Some(pn);
             s.prompt_ms = Some(pms);
             s.prompt_tps = Some(pn as f64 / (pms / 1000.0));
@@ -566,6 +621,7 @@ pub async fn record_timing(
     };
     let sample = TimingSample {
         at: chrono::Local::now().to_rfc3339(),
+        model: None,
         prompt_n,
         prompt_ms,
         prompt_tps,
@@ -642,6 +698,7 @@ pub async fn send_test_prompt(
     };
     let sample = TimingSample {
         at: chrono::Local::now().to_rfc3339(),
+        model: None,
         prompt_n,
         prompt_ms,
         prompt_tps: match (prompt_n, prompt_ms) {
@@ -688,8 +745,34 @@ pub struct SlotLive {
     pub live_tps: Option<f64>,
 }
 
+fn slot_u64(v: &serde_json::Value, key: &str) -> u64 {
+    v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+}
+
+/// Live state of one model known to the router.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelActivity {
+    /// Router alias (INI section name) used by API clients.
+    pub alias: String,
+    /// `unloaded` | `loading` | `loaded` | `sleeping` (empty in
+    /// single-model mode).
+    pub status: String,
+    /// At least one slot is decoding.
+    pub active: bool,
+    pub prefill_tps: Option<f64>,
+    pub decode_tps: Option<f64>,
+    pub ctx_used: u64,
+    pub ctx_max: Option<u64>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Activity {
+    /// The server runs in router mode (several models, loaded on demand).
+    pub router: bool,
+    /// Per-model live state, one entry per registered model.
+    pub models: Vec<ModelActivity>,
+    /// Alias the flat fields below describe (`None` in single-model mode).
+    pub selected_model: Option<String>,
     /// Speeds over the interval (sum of all active slots). None when idle.
     pub prefill_tps: Option<f64>,
     pub decode_tps: Option<f64>,
@@ -714,60 +797,183 @@ pub struct Activity {
     pub ttft_last: Option<f64>,
     pub ttft_avg: Option<f64>,
     pub ttft_n: u64,
-    /// Running slots + what they are doing.
+    /// Running slots + what they are doing (of the selected model).
     pub active_slots: Vec<SlotLive>,
-    /// Context: tokens used (active slots) / n_ctx.
+    /// Context: tokens used (active slots) / n_ctx (of the selected model).
     pub ctx_used: u64,
     pub ctx_max: Option<u64>,
     pub requests_processing: Option<u64>,
     pub requests_deferred: Option<u64>,
-    /// Per-request history (backend, memory only).
+    /// Per-request history (backend, memory only), rows tagged with
+    /// their model.
     pub history: Vec<TimingSample>,
 }
 
-fn slot_u64(v: &serde_json::Value, key: &str) -> u64 {
-    v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+impl Activity {
+    /// Nothing to report yet (router with no registered model, or the
+    /// server answers nothing yet).
+    fn empty(router: bool) -> Self {
+        Self {
+            router,
+            models: vec![],
+            selected_model: None,
+            prefill_tps: None,
+            decode_tps: None,
+            avg_prefill_tps: None,
+            avg_decode_tps: None,
+            avg_prefill_polls: 0,
+            avg_decode_polls: 0,
+            cache_live: None,
+            cache_session: None,
+            cache_session_cached: 0,
+            cache_session_total: 0,
+            spec_accept: None,
+            spec_accepted: 0,
+            spec_drafted: 0,
+            ttft_last: None,
+            ttft_avg: None,
+            ttft_n: 0,
+            active_slots: vec![],
+            ctx_used: 0,
+            ctx_max: None,
+            requests_processing: None,
+            requests_deferred: None,
+            history: vec![],
+        }
+    }
 }
 
-/// One activity poll: /metrics (totals) + /slots (live + history).
-#[tauri::command]
-pub async fn poll_activity(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, StatsState>,
-    port: u16,
-) -> Result<Activity, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let base = format!("http://127.0.0.1:{port}");
+// ---------------------------------------------------------------------------
+// Router mode helpers.
+// ---------------------------------------------------------------------------
 
-    let mtext = client
-        .get(format!("{base}/metrics"))
-        .send()
-        .await
-        .map_err(|e| format!("/metrics: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("/metrics statut: {e}"))?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
-    let slots_json: Option<serde_json::Value> =
-        match client.get(format!("{base}/slots")).send().await {
-            Ok(r) => r.json().await.ok(),
-            Err(_) => None,
-        };
+/// Is the server in router mode? Without a `model` query param `/props`
+/// answers the router itself (`{"role":"router","max_instances":N,...}`),
+/// while a single-model server answers its own props.
+async fn is_router(client: &reqwest::Client, base: &str) -> bool {
+    match client.get(format!("{base}/props")).send().await {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(v) => v.get("role").and_then(|r| r.as_str()) == Some("router"),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
 
-    // --- Synchronous section under lock (no await below).
-    // Current poll's /metrics counters (exact per-request windows).
-    let ctr_now = read_ctrs(&mtext);
-    // Server log (immediate ground truth per task). Missing if the server
-    // was adopted with a different log file -> counters/wall fallback.
-    let log_path = crate::state::app_data_dir(&app)
-        .map(|d| d.join("logs").join("llama-server.log"))
-        .ok();
-    let mut track = state.track.lock().map_err(|e| e.to_string())?;
-    let now = std::time::Instant::now();
+/// Percent-encode an alias for the `?model=` query param.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Registered models + their router status (`unloaded`, `loading`,
+/// `loaded`, `sleeping`), from `GET /models`. Pure parser, tested.
+pub(crate) fn parse_models_list(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let id = m.get("id").and_then(|x| x.as_str())?.to_string();
+                    let st = m
+                        .get("status")
+                        .and_then(|s| s.get("value"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unloaded")
+                        .to_string();
+                    Some((id, st))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/metrics` + `/slots` for one model. `autoload=false` is mandatory: the
+/// router *loads* a model on a bare `/slots?model=X`, which would make the
+/// poller load every registered model and defeat router mode. With it, an
+/// unloaded model answers 400 `model is not loaded` (no side effect) and a
+/// sleeping one still answers (idle slots, zeroed counters).
+async fn fetch_model(
+    client: &reqwest::Client,
+    base: &str,
+    alias: &str,
+) -> (String, Option<serde_json::Value>) {
+    let q = format!("model={}&autoload=false", urlencode(alias));
+    let mtext = match client.get(format!("{base}/metrics?{q}")).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    };
+    let slots = match client.get(format!("{base}/slots?{q}")).send().await {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    (mtext, slots)
+}
+
+/// Find the history row to amend: same `at` **and** same model (rows of
+/// several models interleave).
+fn hist_row_mut<'a>(h: &'a mut Vec<TimingSample>, at: &str, model: &Option<String>) -> Option<&'a mut TimingSample> {
+    h.iter_mut()
+        .rev()
+        .find(|e| e.at == at && e.model == *model)
+}
+
+/// Everything one model contributes to a poll.
+#[derive(Debug, Clone)]
+struct ModelOut {
+    prefill_tps: Option<f64>,
+    decode_tps: Option<f64>,
+    avg_prefill_tps: Option<f64>,
+    avg_decode_tps: Option<f64>,
+    avg_prefill_polls: u64,
+    avg_decode_polls: u64,
+    cache_live: Option<f64>,
+    cache_session: Option<f64>,
+    cache_session_cached: u64,
+    cache_session_total: u64,
+    spec_accept: Option<f64>,
+    spec_accepted: u64,
+    spec_drafted: u64,
+    ttft_last: Option<f64>,
+    ttft_avg: Option<f64>,
+    ttft_n: u64,
+    active_slots: Vec<SlotLive>,
+    ctx_used: u64,
+    ctx_max: Option<u64>,
+    requests_processing: Option<u64>,
+    requests_deferred: Option<u64>,
+}
+
+/// One model's poll: the whole live-tracking algorithm, unchanged, over
+/// that model's own slots, counters, history and averages.
+/// `key` is the router alias (empty string in single-model mode).
+#[allow(clippy::too_many_arguments)]
+fn poll_model(
+    key: &str,
+    track: &mut SimpleTrack,
+    avg: &mut PollAvg,
+    hist: &mut Vec<TimingSample>,
+    mtext: &str,
+    slots_json: Option<&serde_json::Value>,
+    ctr_now: Ctr,
+    log_path: Option<&std::path::Path>,
+    port: Option<u16>,
+    now: std::time::Instant,
+) -> ModelOut {
+    let model: Option<String> = if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    };
+    // `now` is the shared poll instant: one timeline for every model.
 
     let mut active_slots = vec![];
     let mut finished = vec![];
@@ -844,13 +1050,12 @@ pub async fn poll_activity(
                     if let Some(pend) = track.pending.take() {
                         let (better, _, _) = with_counters(pend.wall.clone(), pend.start, ctr_now);
                         if better.spec_drafted.is_some() {
-                            if let Ok(mut h) = state.hist.lock() {
-                                if h.last().map(|l| l.at == pend.wall.at).unwrap_or(false) {
-                                    let e = h.last_mut().unwrap();
-                                    if e.spec_drafted.is_none() {
-                                        e.spec_drafted = better.spec_drafted;
-                                        e.spec_accepted = better.spec_accepted;
-                                    }
+                            // Late spec flush of the previous request: amend
+                            // its own history row, not another model's.
+                            if let Some(e) = hist_row_mut(hist, &pend.wall.at, &model) {
+                                if e.spec_drafted.is_none() {
+                                    e.spec_drafted = better.spec_drafted;
+                                    e.spec_accepted = better.spec_accepted;
                                 }
                             }
                         }
@@ -866,6 +1071,7 @@ pub async fn poll_activity(
                                 log_path.as_deref(),
                                 p.start,
                                 ctr_now,
+                                port,
                             );
                             if has_speeds(&s) {
                                 finished.push(s.clone());
@@ -1039,6 +1245,7 @@ pub async fn poll_activity(
                             log_path.as_deref(),
                             win_start,
                             ctr_now,
+                            port,
                         );
                         if has_speeds(&s) {
                             finished.push(s.clone());
@@ -1165,18 +1372,17 @@ pub async fn poll_activity(
         track.cache_held = None;
         None
     };
-    drop(track);
-
     // Live: sliding-window rates, summed over active slots.
     // `None` when idle (no slot in phase with a fresh value) -> `--`.
     let prefill_tps = has_pre.then_some(smooth_pre_sum);
     let decode_tps = has_dec.then_some(smooth_dec_sum);
-    // Speculative acceptance, session-wide (counters).
+
+    // Speculative acceptance, per model (counters of this instance).
     let spec_accepted =
-        parse_metric(&mtext, "llamacpp:spec_decode_num_accepted_tokens_total").unwrap_or(0.0).max(0.0)
+        parse_metric(mtext, "llamacpp:spec_decode_num_accepted_tokens_total").unwrap_or(0.0).max(0.0)
             as u64;
     let spec_drafted =
-        parse_metric(&mtext, "llamacpp:spec_decode_num_draft_tokens_total").unwrap_or(0.0).max(0.0)
+        parse_metric(mtext, "llamacpp:spec_decode_num_draft_tokens_total").unwrap_or(0.0).max(0.0)
             as u64;
     let spec_accept = if spec_drafted > 0 {
         Some((spec_accepted as f64 / spec_drafted as f64).clamp(0.0, 1.0))
@@ -1184,71 +1390,60 @@ pub async fn poll_activity(
         None
     };
 
-    // Averages over reads: each poll with a speed counts as 1.
-    let (avg_pre, avg_dec, n_pre, n_dec) = match state.avg.lock() {
-        Ok(mut a) => {
-            if let Some(v) = prefill_tps {
-                a.sum_pre += v;
-                a.n_pre += 1;
-            }
-            if let Some(v) = decode_tps {
-                a.sum_dec += v;
-                a.n_dec += 1;
-            }
-            let ap = if a.n_pre > 0 {
-                Some(a.sum_pre / a.n_pre as f64)
-            } else {
-                None
-            };
-            let ad = if a.n_dec > 0 {
-                Some(a.sum_dec / a.n_dec as f64)
-            } else {
-                None
-            };
-            (ap, ad, a.n_pre, a.n_dec)
-        }
-        Err(_) => (None, None, 0, 0),
+    // Averages over reads, per model: each poll with a speed counts as 1.
+    if let Some(v) = prefill_tps {
+        avg.sum_pre += v;
+        avg.n_pre += 1;
+    }
+    if let Some(v) = decode_tps {
+        avg.sum_dec += v;
+        avg.n_dec += 1;
+    }
+    let avg_pre = if avg.n_pre > 0 {
+        Some(avg.sum_pre / avg.n_pre as f64)
+    } else {
+        None
+    };
+    let avg_dec = if avg.n_dec > 0 {
+        Some(avg.sum_dec / avg.n_dec as f64)
+    } else {
+        None
     };
 
-    for s in finished {
-        push_history(&state, s);
+    for mut s in finished {
+        s.model = model.clone();
+        push_history_into(hist, &mut s);
     }
-    // Apply the catch-up to the last line (same `at`).
-    // Stop as soon as everything counter-resolvable arrived.
+    // Catch-up: counters may be flushed just after our closing poll's
+    // /metrics read. Replay the window on the following idle polls
+    // (safe attribution: nothing else is running). Stays alive until
+    // speeds, cache AND spec are all resolved (bounded by `left`).
     if let Some((st, wall)) = amend {
         let (better, pre_now, dec_now) = with_counters(wall.clone(), st, ctr_now);
         let cache_now = better.cache_n.is_some();
         let spec_now = better.spec_drafted.is_some();
         if has_speeds(&better) {
-            if let Ok(mut h) = state.hist.lock() {
-                if h.last().map(|l| l.at == wall.at).unwrap_or(false) {
-                    *h.last_mut().unwrap() = better;
-                }
+            if let Some(e) = hist_row_mut(hist, &wall.at, &model) {
+                *e = better;
             }
         }
-        if let Ok(mut t) = state.track.lock() {
-            if let Some(p) = t.pending.as_mut() {
-                p.pre_ok = p.pre_ok || pre_now;
-                p.dec_ok = p.dec_ok || dec_now;
-                p.cache_ok = p.cache_ok || cache_now;
-                p.spec_ok = p.spec_ok || spec_now;
-                if p.left > 0 {
-                    p.left -= 1;
-                }
-                if p.left == 0 || p.resolved() {
-                    t.pending = None;
-                }
+        if let Some(p) = track.pending.as_mut() {
+            p.pre_ok = p.pre_ok || pre_now;
+            p.dec_ok = p.dec_ok || dec_now;
+            p.cache_ok = p.cache_ok || cache_now;
+            p.spec_ok = p.spec_ok || spec_now;
+            if p.left > 0 {
+                p.left -= 1;
+            }
+            if p.left == 0 || p.resolved() {
+                track.pending = None;
             }
         }
     }
-    let history = state
-        .hist
-        .lock()
-        .map(|h| h.clone())
-        .unwrap_or_default();
-    // Session cache reuse, summed over finished requests (immune to
-    // aggregate-counter semantics and flush delays).
-    let (sess_cached, sess_total) = session_cache(&history);
+
+    // Session figures over this model's own history rows only.
+    let mine: Vec<TimingSample> = hist.iter().filter(|s| s.model == model).cloned().collect();
+    let (sess_cached, sess_total) = session_cache(&mine);
     let cache_session = if sess_total > 0 {
         Some(sess_cached as f64 / sess_total as f64)
     } else {
@@ -1258,7 +1453,7 @@ pub async fn poll_activity(
     let mut ttft_sum = 0.0f64;
     let mut ttft_n = 0u64;
     let mut ttft_last: Option<f64> = None;
-    for s in &history {
+    for s in &mine {
         if let Some(ms) = s.prompt_ms {
             if ms > 0.0 {
                 ttft_sum += ms / 1000.0;
@@ -1273,13 +1468,13 @@ pub async fn poll_activity(
         None
     };
 
-    Ok(Activity {
+    ModelOut {
         prefill_tps,
         decode_tps,
         avg_prefill_tps: avg_pre,
         avg_decode_tps: avg_dec,
-        avg_prefill_polls: n_pre,
-        avg_decode_polls: n_dec,
+        avg_prefill_polls: avg.n_pre,
+        avg_decode_polls: avg.n_dec,
         cache_live,
         cache_session,
         cache_session_cached: sess_cached,
@@ -1293,8 +1488,163 @@ pub async fn poll_activity(
         active_slots,
         ctx_used,
         ctx_max,
-        requests_processing: parse_metric_u64(&mtext, "llamacpp:requests_processing"),
-        requests_deferred: parse_metric_u64(&mtext, "llamacpp:requests_deferred"),
+        requests_processing: parse_metric_u64(mtext, "llamacpp:requests_processing"),
+        requests_deferred: parse_metric_u64(mtext, "llamacpp:requests_deferred"),
+    }
+}
+
+/// One activity poll. Router mode is handled transparently: the router's
+/// `/props` (no `model` param) tells us it is a router, then every
+/// registered model is polled on its own `/metrics?model=` + `/slots?model=`
+/// with `autoload=false`, and the state (slots, windows, averages,
+/// pending catch-up) is kept per model.
+#[tauri::command]
+pub async fn poll_activity(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, StatsState>,
+    port: u16,
+) -> Result<Activity, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let router = is_router(&client, &base).await;
+
+    // Registry + status. In single-model mode there is one implicit target.
+    let targets: Vec<(String, String)> = if router {
+        match client.get(format!("{base}/models")).send().await {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) => parse_models_list(&v),
+                Err(_) => vec![],
+            },
+            _ => vec![],
+        }
+    } else {
+        vec![(SINGLE_MODEL_KEY.to_string(), "loaded".to_string())]
+    };
+
+    // Instance port per model, from the router's own log lines: it is what
+    // attributes a `print_timing ... task N` line to a model (task ids
+    // restart in every instance).
+    let log_path = crate::state::app_data_dir(&app)
+        .ok()
+        .map(|d| d.join("logs").join("llama-server.log"));
+    let log_text = log_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let ports = parse_model_ports(&log_text);
+
+    // --- Network phase: every HTTP call happens here, before any lock.
+    let mut fetched: Vec<(String, String, String, Option<serde_json::Value>)> =
+        Vec::with_capacity(targets.len());
+    for (key, status) in &targets {
+        let (mtext, slots) = if router {
+            fetch_model(&client, &base, key).await
+        } else {
+            let mtext = match client.get(format!("{base}/metrics")).send().await {
+                Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+                _ => return Err(format!("/metrics: indisponible sur le port {port}")),
+            };
+            let slots = match client.get(format!("{base}/slots")).send().await {
+                Ok(r) => r.json::<serde_json::Value>().await.ok(),
+                Err(_) => None,
+            };
+            (mtext, slots)
+        };
+        fetched.push((key.clone(), status.clone(), mtext, slots));
+    }
+
+    // --- Synchronous section under lock (no await below).
+    let mut track_map = state.track.lock().map_err(|e| e.to_string())?;
+    let mut avg_map = state.avg.lock().map_err(|e| e.to_string())?;
+    let mut hist = state.hist.lock().map_err(|e| e.to_string())?;
+    let now = std::time::Instant::now();
+
+    let mut outs: Vec<(String, String, ModelOut)> = Vec::with_capacity(fetched.len());
+    for (key, status, mtext, slots) in &fetched {
+        let track = track_map.entry(key.clone()).or_default();
+        let avg = avg_map.entry(key.clone()).or_default();
+        let ctr_now = read_ctrs(mtext);
+        let out = poll_model(
+            key,
+            track,
+            avg,
+            &mut hist,
+            mtext,
+            slots.as_ref(),
+            ctr_now,
+            log_path.as_deref(),
+            if router { ports.get(key.as_str()).copied() } else { None },
+            now,
+        );
+        outs.push((key.clone(), status.clone(), out));
+    }
+    // Forget models removed from the registry (their history rows stay).
+    track_map.retain(|k, _| targets.iter().any(|(t, _)| t == k));
+    avg_map.retain(|k, _| targets.iter().any(|(t, _)| t == k));
+
+    // "Auto" selection: a model decoding right now, else the one that most
+    // recently produced a finished request, else the first.
+    let last_served = hist.last().and_then(|s| s.model.clone());
+    let idx = outs
+        .iter()
+        .position(|(_, _, o)| o.active_slots.iter().any(|s| s.phase == "decode"))
+        .or_else(|| {
+            outs.iter()
+                .position(|(k, _, _)| last_served.as_ref() == Some(k))
+        });
+    let Some(idx) = idx.filter(|_| !outs.is_empty()) else {
+        // Nothing registered yet (or the server stopped answering).
+        return Ok(Activity::empty(router));
+    };
+    let (chosen_key, _, chosen) = &outs[idx];
+
+    let models: Vec<ModelActivity> = outs
+        .iter()
+        .map(|(k, st, o)| ModelActivity {
+            alias: k.clone(),
+            status: st.clone(),
+            active: o.active_slots.iter().any(|s| s.phase == "decode"),
+            prefill_tps: o.prefill_tps,
+            decode_tps: o.decode_tps,
+            ctx_used: o.ctx_used,
+            ctx_max: o.ctx_max,
+        })
+        .collect();
+
+    let history = hist.clone();
+    Ok(Activity {
+        router,
+        selected_model: if router {
+            Some(chosen_key.clone())
+        } else {
+            None
+        },
+        models,
+        prefill_tps: chosen.prefill_tps,
+        decode_tps: chosen.decode_tps,
+        avg_prefill_tps: chosen.avg_prefill_tps,
+        avg_decode_tps: chosen.avg_decode_tps,
+        avg_prefill_polls: chosen.avg_prefill_polls,
+        avg_decode_polls: chosen.avg_decode_polls,
+        cache_live: chosen.cache_live,
+        cache_session: chosen.cache_session,
+        cache_session_cached: chosen.cache_session_cached,
+        cache_session_total: chosen.cache_session_total,
+        spec_accept: chosen.spec_accept,
+        spec_accepted: chosen.spec_accepted,
+        spec_drafted: chosen.spec_drafted,
+        ttft_last: chosen.ttft_last,
+        ttft_avg: chosen.ttft_avg,
+        ttft_n: chosen.ttft_n,
+        active_slots: chosen.active_slots.clone(),
+        ctx_used: chosen.ctx_used,
+        ctx_max: chosen.ctx_max,
+        requests_processing: chosen.requests_processing,
+        requests_deferred: chosen.requests_deferred,
         history,
     })
 }
@@ -1306,6 +1656,7 @@ mod tests {
     fn sample(prompt_n: u64, prompt_ms: f64, predicted_n: u64, predicted_ms: f64) -> TimingSample {
         TimingSample {
             at: "2026-01-01T00:00:00+00:00".to_string(),
+            model: None,
             prompt_n: Some(prompt_n),
             prompt_ms: Some(prompt_ms),
             prompt_tps: Some(prompt_n as f64 / (prompt_ms / 1000.0)),
@@ -1319,6 +1670,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn router_model_ports_come_from_the_proxy_lines() {
+        // Real router log lines.
+        let log = "0.09.835 I srv  proxy_reques: proxying request to model test-9b on port 49574\n\
+                   1.30.571 I srv  proxy_reques: proxying request to model test-27b on port 57182\n\
+                   1.31.009 I srv  proxy_reques: proxying request to model test-9b on port 49600\n";
+        let m = parse_model_ports(log);
+        // Last occurrence wins: an instance restart changes the port.
+        assert_eq!(m.get("test-9b").copied(), Some(49600));
+        assert_eq!(m.get("test-27b").copied(), Some(57182));
+    }
+
+    #[test]
+    fn router_model_ports_ignore_other_lines() {
+        let log = "[49574] I slot print_timing: id  3 | task 5 | n_gen = 100\n\
+                   I srv  proxy_reques: proxying request to model  on port \n";
+        assert!(parse_model_ports(log).is_empty());
+    }
+
+    #[test]
+    fn log_timings_are_attributed_to_the_right_instance() {
+        // Two instances both used task 5: without the `[port]` prefix the
+        // first match would win and one model would steal the other's
+        // timings. Layout taken from a real router run.
+        let dir = std::env::temp_dir().join("bonsai-log-attr-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("llama-server.log");
+        let log = "[49574] I slot print_timing: id  3 | task 5 | prompt eval time =    100.00 ms /    10 tokens (   10.00 ms per token)\n\
+                   [49574] I slot print_timing: id  3 | task 5 |        eval time =    2000.00 ms /   100 tokens (   20.00 ms per token)\n\
+                   [57182] I slot print_timing: id  0 | task 5 | prompt eval time =     10.00 ms /     1 tokens\n\
+                   [57182] I slot print_timing: id  0 | task 5 |        eval time =      50.00 ms /     5 tokens\n";
+        std::fs::write(&path, log).unwrap();
+
+        assert_eq!(
+            lookup_log_timings(&path, 5, Some(49574)),
+            Some((10, 100.0, 100, 2000.0))
+        );
+        assert_eq!(
+            lookup_log_timings(&path, 5, Some(57182)),
+            Some((1, 10.0, 5, 50.0))
+        );
+        // Unknown instance: nothing (never borrow another model's timings).
+        assert_eq!(lookup_log_timings(&path, 5, Some(1234)), None);
+        // Single-model mode (port = None): no prefix filter, last match
+        // wins — unchanged legacy behaviour.
+        assert_eq!(
+            lookup_log_timings(&path, 5, None),
+            Some((1, 10.0, 5, 50.0))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn models_list_parses_alias_and_status() {
+        // Real `GET /models` shape in router mode.
+        let v = serde_json::json!({
+            "data": [
+                {"id": "test-9b", "status": {"value": "loaded", "args": ["--port","49574"]}},
+                {"id": "test-27b", "status": {"value": "sleeping"}},
+                {"id": "test-new", "status": {"value": "unloaded"}}
+            ]
+        });
+        assert_eq!(
+            parse_models_list(&v),
+            vec![
+                ("test-9b".to_string(), "loaded".to_string()),
+                ("test-27b".to_string(), "sleeping".to_string()),
+                ("test-new".to_string(), "unloaded".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn models_list_tolerates_missing_fields() {
+        assert!(parse_models_list(&serde_json::json!({})).is_empty());
+        assert!(parse_models_list(&serde_json::json!({"data": []})).is_empty());
+        // No `status`: treated as not loaded rather than dropped.
+        let v = serde_json::json!({"data": [{"id": "x"}]});
+        assert_eq!(
+            parse_models_list(&v),
+            vec![("x".to_string(), "unloaded".to_string())]
+        );
+    }
+
+    #[test]
+    fn alias_is_percent_encoded_for_the_query() {
+        assert_eq!(urlencode("bonsai-27b"), "bonsai-27b");
+        assert_eq!(urlencode("a/b:c"), "a%2Fb%3Ac");
+        assert_eq!(urlencode("q8_0 model"), "q8_0%20model");
+    }
+
+    #[test]
+    fn history_rows_are_matched_on_model_too() {
+        // The catch-up must amend the row of *its* model even when
+        // another model's request finished in between.
+        let mut a = sample(10, 100.0, 10, 100.0);
+        a.at = "T1".into();
+        a.model = Some("a".into());
+        let mut b = sample(20, 200.0, 20, 200.0);
+        b.at = "T2".into();
+        b.model = Some("b".into());
+        let mut c = sample(30, 300.0, 30, 300.0);
+        c.at = "T3".into();
+        c.model = Some("a".into());
+        let mut h = vec![a, b, c];
+
+        let row = hist_row_mut(&mut h, "T1", &Some("a".into())).unwrap();
+        row.predicted_n = Some(999);
+        assert_eq!(h[0].predicted_n, Some(999));
+        assert_eq!(h[1].predicted_n, Some(20)); // untouched
+
+        // Same `at`, other model: no match.
+        assert!(hist_row_mut(&mut h, "T1", &Some("b".into())).is_none());
+        assert!(hist_row_mut(&mut h, "T1", &None).is_none());
+    }
+
+        // The user's case: req1 fresh (338 prompt, 0 cached), req2 with
     #[test]
     fn session_cache_sums_coherent_pairs() {
         // The user's case: req1 fresh (338 prompt, 0 cached), req2 with

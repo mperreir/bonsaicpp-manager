@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import i18n from "./i18n";
-import { api, fmtBytes, serverHost, type GpuMemory, type ServerStatus, type SimplePreset } from "./lib/api";
+import { api, EMPTY_ROUTER, fmtBytes, serverHost, suggestAlias, type GpuMemory, type IniError, type RouterConfig, type ServerStatus, type SimplePreset } from "./lib/api";
 import BackendPage from "./pages/BackendPage";
 import ModelsPage from "./pages/ModelsPage";
 import ServerPage from "./pages/ServerPage";
@@ -18,6 +18,19 @@ type Tab = "backend" | "modeles" | "serveur" | "stats" | "logs" | "parametres" |
 const PRESET_KEY = "bonsai.preset";
 const EXTRA_KEY = "bonsai.extraArgs";
 const AUTO_START_SERVER_KEY = "bonsai.autostartServer";
+const ROUTER_KEY = "bonsai.router";
+
+/// The router registry is owned by the backend (it writes the preset);
+/// localStorage only mirrors it so the UI has something to show offline.
+function loadRouter(): RouterConfig {
+  try {
+    const raw = localStorage.getItem(ROUTER_KEY);
+    if (raw) return { ...EMPTY_ROUTER, ...JSON.parse(raw) };
+  } catch {
+    /* ignore */
+  }
+  return EMPTY_ROUTER;
+}
 
 function loadPreset(): SimplePreset {
   try {
@@ -57,6 +70,7 @@ export default function App() {
   const [gpu, setGpu] = useState<GpuMemory | null>(null);
   const [preset, setPresetState] = useState<SimplePreset>(loadPreset);
   const [extraArgs, setExtraArgsState] = useState<Record<string, string>>(loadExtraArgs);
+  const [router, setRouterState] = useState<RouterConfig>(loadRouter);
   const [autoStartServer, setAutoStartServerState] = useState<boolean>(() => {
     try {
       return localStorage.getItem(AUTO_START_SERVER_KEY) === "1";
@@ -82,6 +96,39 @@ export default function App() {
       /* ignore */
     }
   };
+  /// Validate against the live `--help`, then persist (backend writes the
+  /// INI). Returns the rejected keys; nothing is saved when non-empty.
+  const saveRouter = async (cfg: RouterConfig): Promise<IniError[]> => {
+    const errs = await api.setRouterConfig(cfg);
+    if (errs.length === 0) {
+      setRouterState(cfg);
+      try {
+        localStorage.setItem(ROUTER_KEY, JSON.stringify(cfg));
+      } catch {
+        /* ignore */
+      }
+    }
+    return errs;
+  };
+  const setRouter = (cfg: RouterConfig) => {
+    setRouterState(cfg);
+    try {
+      localStorage.setItem(ROUTER_KEY, JSON.stringify(cfg));
+    } catch {
+      /* ignore */
+    }
+  };
+  /// Register a downloaded GGUF in the router from the Models tab.
+  const addToRouter = async (file: string) => {
+    let alias = suggestAlias(file);
+    let n = 2;
+    while (router.models.some((m) => m.alias === alias)) alias = `${suggestAlias(file)}-${n++}`;
+    const errs = await saveRouter({
+      ...router,
+      models: [...router.models, { alias, model_path: file, overrides: [], load_on_startup: false }],
+    });
+    if (errs.length === 0) setTab("serveur");
+  };
 
   const stats = useStats(status);
   const [autostart, setAutostartState] = useState<boolean | null>(null);
@@ -89,6 +136,15 @@ export default function App() {
   useEffect(() => {
     // Converge the backend (tray menu) on the resolved UI language.
     api.setAppLanguage(i18n.language).catch(() => {});
+    // The backend owns the registry (it regenerates the preset from it).
+    api.routerConfig().then((cfg) => {
+      setRouterState({ ...EMPTY_ROUTER, ...cfg });
+      try {
+        localStorage.setItem(ROUTER_KEY, JSON.stringify(cfg));
+      } catch {
+        /* ignore */
+      }
+    }).catch(() => {});
     api.serverStatus().then((st) => {
       setStatus(st);
       // Launch-time server autostart (once, incl. StrictMode double-mount):
@@ -103,8 +159,10 @@ export default function App() {
         }
         if (flag && !st.running) {
           const p = loadPreset();
-          if (p.model_path) {
-            api.startServer(p, loadExtraArgs()).then(setStatus).catch(() => {});
+          const r = loadRouter();
+          // Router mode needs no model at launch; single-model mode does.
+          if (r.models.length > 0 || p.model_path) {
+            api.startServer(p, loadExtraArgs(), r).then(setStatus).catch(() => {});
           }
         }
       }
@@ -128,10 +186,18 @@ export default function App() {
   };
 
   const toggleServer = async () => {
-    if (status.running) setStatus(await api.stopServer());
-    else if (preset.model_path) setStatus(await api.startServer(preset, extraArgs));
-    else setTab("modeles");
+    if (status.running) {
+      setStatus(await api.stopServer());
+    } else if (router.models.length > 0) {
+      // Router mode: nothing to load, models come with the API calls.
+      setStatus(await api.startServer(preset, extraArgs, router));
+    } else if (preset.model_path) {
+      setStatus(await api.startServer(preset, extraArgs, EMPTY_ROUTER));
+    } else {
+      setTab("modeles");
+    }
   };
+  const hasRouter = router.models.length > 0;
 
   const openHost = preset.host === "0.0.0.0" ? "localhost" : preset.host;
   const serverUrl =
@@ -160,6 +226,15 @@ export default function App() {
         <header className="topbar">
           <span className={`dot ${status.running ? "on" : "off"}`} title={status.running ? t("topbar.runningTitle") : t("topbar.stoppedTitle")} />
           <span className="muted">{status.running ? `${serverHost(preset, extraArgs)}:${status.port} • pid ${status.pid}` : t("topbar.stopped")}</span>
+          {status.running && hasRouter && (stats.activity?.models ?? []).map((m) => (
+            <span
+              key={m.alias}
+              className={`chip m-${m.status} ${m.active ? "busy" : ""}`}
+              title={t(`router.status.${m.status}`, { alias: m.alias })}
+            >
+              {m.alias}
+            </span>
+          ))}
           {gpu && gpu.total_bytes > 0 && (
             <span className="muted" title={`${gpu.adapter} — budget ${fmtBytes(gpu.budget_bytes)}`}>
               • GPU {fmtBytes(gpu.used_bytes)} / {fmtBytes(gpu.total_bytes)}
@@ -171,14 +246,14 @@ export default function App() {
               {t("topbar.open", { host: serverUrl.replace("http://", "") })}
             </button>
           )}
-          <button onClick={toggleServer} className="primary" disabled={!status.running && !preset.model_path} title={!status.running && !preset.model_path ? t("topbar.chooseModelFirst") : ""}>
+          <button onClick={toggleServer} className="primary" disabled={!status.running && !preset.model_path && !hasRouter} title={!status.running && !preset.model_path && !hasRouter ? t("topbar.chooseModelFirst") : ""}>
             {status.running ? t("topbar.stop") : t("topbar.start")}
           </button>
         </header>
         <main className="content">
           {tab === "backend" && <BackendPage preset={preset} extraArgs={extraArgs} status={status} setServer={setStatus} />}
-          {tab === "modeles" && <ModelsPage selected={preset.model_path} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
-          {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} />}
+          {tab === "modeles" && <ModelsPage selected={preset.model_path} router={router} onAddToRouter={addToRouter} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
+          {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} router={router} saveRouter={saveRouter} setRouter={setRouter} />}
           {tab === "stats" && <StatsPage status={status} stats={stats} />}
           {tab === "logs" && <LogsPage status={status} />}
           {tab === "parametres" && (
@@ -191,6 +266,8 @@ export default function App() {
               setPollMs={stats.setPollMs}
               tooltipOn={stats.tooltipOn}
               setTooltipOn={stats.setTooltipOn}
+              router={router}
+              setRouter={setRouter}
             />
           )}
           {tab === "apropos" && <AboutPage />}

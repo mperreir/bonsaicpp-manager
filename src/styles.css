@@ -119,6 +119,22 @@ table.kv td:first-child { color: var(--muted); white-space: nowrap; }
 .small { font-size: 11px; }
 /* Tight section labels (Stats "live / averages"): no big gap above. */
 .seclabel { margin: 2px 0 8px; }
+/* Router: model status chips (topbar + Stats selector) */
+.chip-row { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--muted); white-space: nowrap;
+}
+.chip.on { background: var(--accent); color: var(--accent-fg); }
+.chip.busy { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 45%, transparent); }
+.chip.m-loaded { color: var(--ok); }
+.chip.m-loading { color: var(--warn); }
+.chip.m-sleeping { color: var(--muted); opacity: .8; }
+.chip.m-unloaded { color: var(--muted); }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30ch; }
+.router-model { border-top: 1px solid var(--border); padding: 8px 0; }
+.router-model:first-of-type { border-top: 0; }
 .alert { padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; }
 .alert.error { border: 1px solid var(--err); }
 .badge {

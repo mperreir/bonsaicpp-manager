@@ -3,6 +3,7 @@ mod gpu;
 mod help_parser;
 mod locale;
 mod models;
+mod router;
 mod server_cmd;
 mod state;
 mod stats;
@@ -229,6 +230,9 @@ pub fn run() {
             backend::set_default_backend,
             backend::delete_backend,
             help_parser::parse_server_help,
+            router::router_config,
+            router::router_validate,
+            router::set_router_config,
             models::list_local_models,
             models::list_remote_files,
             models::download_model_file,

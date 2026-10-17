@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, serverHost, type HelpSchema, type HelpOption, type ServerStatus, type SimplePreset } from "../lib/api";
+import { api, serverHost, type HelpSchema, type HelpOption, type IniError, type RouterConfig, type ServerStatus, type SimplePreset } from "../lib/api";
+import RouterEditor from "./RouterEditor";
 
 interface Props {
   preset: SimplePreset;
@@ -9,6 +10,9 @@ interface Props {
   setExtraArgs: (e: Record<string, string>) => void;
   status: ServerStatus;
   setStatus: (s: ServerStatus) => void;
+  router: RouterConfig;
+  saveRouter: (c: RouterConfig) => Promise<IniError[]>;
+  setRouter: (c: RouterConfig) => void;
 }
 
 function kindOf(o: HelpOption): string {
@@ -24,8 +28,9 @@ function enumValues(o: HelpOption): string[] {
   return [];
 }
 
-export default function ServerPage({ preset, setPreset, extraArgs, setExtraArgs, status, setStatus }: Props) {
-  const [mode, setMode] = useState<"simple" | "expert">("simple");
+export default function ServerPage({ preset, setPreset, extraArgs, setExtraArgs, status, setStatus, router, saveRouter, setRouter }: Props) {
+  const [mode, setMode] = useState<"simple" | "expert" | "router">("router");
+  const hasRouter = router.models.length > 0;
   const [schema, setSchema] = useState<HelpSchema | null>(null);
   const [section, setSection] = useState("");
   const [search, setSearch] = useState("");
@@ -75,7 +80,7 @@ export default function ServerPage({ preset, setPreset, extraArgs, setExtraArgs,
     setBusy("start");
     setError("");
     try {
-      setStatus(await api.startServer(preset, extraArgs));
+      setStatus(await api.startServer(preset, extraArgs, router));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -158,6 +163,7 @@ export default function ServerPage({ preset, setPreset, extraArgs, setExtraArgs,
 
       <div className="row">
         <div className="tabs small">
+          <button className={mode === "router" ? "active" : ""} onClick={() => setMode("router")}>{t("server.routerTab")}</button>
           <button className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>{t("server.simple")}</button>
           <button className={mode === "expert" ? "active" : ""} onClick={() => { setMode("expert"); if (!schema) loadSchema(); }}>{t("server.expert")}</button>
         </div>
@@ -165,13 +171,32 @@ export default function ServerPage({ preset, setPreset, extraArgs, setExtraArgs,
         <span className="muted">{status.running ? t("server.running", { host: serverHost(preset, extraArgs), port: status.port, pid: status.pid }) : t("server.stopped")}</span>
         <span className="spacer" />
         {!status.running ? (
-          <button onClick={start} disabled={busy === "start" || !preset.model_path} className="primary">
+          <button
+            onClick={start}
+            disabled={busy === "start" || (!hasRouter && !preset.model_path)}
+            className="primary"
+            title={!hasRouter && !preset.model_path ? t("topbar.chooseModelFirst") : ""}
+          >
             {busy === "start" ? t("server.starting") : t("server.start")}
           </button>
         ) : (
           <button onClick={stop} disabled={busy === "stop"}>{t("server.stop")}</button>
         )}
       </div>
+
+      {mode === "router" && (
+        <>
+          <RouterEditor router={router} setRouter={setRouter} saveRouter={saveRouter} />
+          <section className="card">
+            <h3>{t("router.serverTitle")}</h3>
+            <p className="muted small">{t("router.serverHelp")}</p>
+            <div className="grid2">
+              <label>{t("router.port")}<input type="number" value={preset.port} onChange={(e) => set("port", Number(e.target.value))} /></label>
+              <label>{t("router.host")}<input value={preset.host} onChange={(e) => set("host", e.target.value)} /></label>
+            </div>
+          </section>
+        </>
+      )}
 
       {mode === "simple" && (
         <section className="card">

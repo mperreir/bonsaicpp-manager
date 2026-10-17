@@ -359,13 +359,13 @@ pub fn parse_help(text: &str) -> HelpSchema {
 }
 
 /// Tauri command: run `<exe> --help` and return the parsed schema.
-#[tauri::command]
-pub async fn parse_server_help(app: tauri::AppHandle) -> Result<HelpSchema, String> {
+/// Run `llama-server --help` on the installed backend and parse it.
+pub async fn fetch_schema(app: &tauri::AppHandle) -> Result<HelpSchema, String> {
     use crate::backend::find_installed;
     use crate::locale::{lang_of, msg, Msg};
     use crate::state::backend_root;
-    let root = backend_root(&app)?;
-    let (_, _, exe) = find_installed(&root).ok_or(msg(lang_of(&app), Msg::BackendNotInstalled))?;
+    let root = backend_root(app)?;
+    let (_, _, exe) = find_installed(&root).ok_or(msg(lang_of(app), Msg::BackendNotInstalled))?;
     // No console flash in release (tokio::process::Command has creation_flags()).
     let mut help_cmd = tokio::process::Command::new(&exe);
     #[cfg(windows)]
@@ -383,6 +383,11 @@ pub async fn parse_server_help(app: tauri::AppHandle) -> Result<HelpSchema, Stri
         return Err("le binaire n'a renvoye aucune aide".to_string());
     }
     Ok(parse_help(&text))
+}
+
+#[tauri::command]
+pub async fn parse_server_help(app: tauri::AppHandle) -> Result<HelpSchema, String> {
+    fetch_schema(&app).await
 }
 
 #[cfg(test)]

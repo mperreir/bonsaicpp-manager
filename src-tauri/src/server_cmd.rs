@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::backend::find_installed;
 use crate::locale::{lang_of, msg, Msg};
+use crate::router::RouterConfig;
 use crate::state::{backend_root, ServerProc, ServerState};
 use crate::tray_icon::refresh_tray_icon;
 
@@ -78,6 +79,63 @@ fn preset_to_args(p: &SimplePreset) -> Vec<String> {
         }
     }
     a
+}
+
+/// Router mode command line: **no `--model`**, so llama-server starts
+/// with nothing loaded and each model comes in on its first API call.
+///
+/// Everything model-related lives in the preset (the `[*]` section holds
+/// the defaults, each `[alias]` its overrides) — only the routing knobs
+/// and the server knobs stay on the command line. Precedence in
+/// llama.cpp: CLI > `[alias]` > `[*]`.
+fn router_to_args(
+    cfg: &RouterConfig,
+    p: &SimplePreset,
+    extra_args: &HashMap<String, String>,
+    ini: &std::path::Path,
+) -> Vec<String> {
+    let mut a = vec![
+        "--models-preset".to_string(),
+        ini.display().to_string(),
+        "--host".to_string(),
+        p.host.clone(),
+        "--port".to_string(),
+        p.port.to_string(),
+        "--metrics".to_string(), // required for the Stats screen
+    ];
+    if cfg.models_max > 0 {
+        a.push("--models-max".to_string());
+        a.push(cfg.models_max.to_string());
+    }
+    // On by default upstream; keep it explicit so the UI toggle has a
+    // visible effect on the command line.
+    a.push("--models-autoload".to_string());
+    if cfg.sleep_idle_seconds >= 0 {
+        a.push("--sleep-idle-seconds".to_string());
+        a.push(cfg.sleep_idle_seconds.to_string());
+    }
+    for (k, v) in extra_args {
+        a.push(k.clone());
+        if !v.is_empty() {
+            a.push(v.clone());
+        }
+    }
+    a
+}
+
+/// Extract llama.cpp's preset rejection from the log, if it is there.
+/// Emitted verbatim by the binary:
+/// `E srv  llama_server: failed to initialize router models: option 'X' not recognized in preset 'Y'`
+fn extract_preset_error(log_text: &str) -> Option<String> {
+    const MARKER: &str = "failed to initialize router models: ";
+    log_text.lines().rev().find_map(|l| {
+        let after = l.split_once(MARKER).map(|(_, rest)| rest.trim())?;
+        if after.is_empty() {
+            None
+        } else {
+            Some(after.to_string())
+        }
+    })
 }
 
 #[tauri::command]
@@ -221,14 +279,51 @@ pub async fn start_server(
     state: State<'_, ServerState>,
     preset: SimplePreset,
     extra_args: HashMap<String, String>,
+    router: Option<RouterConfig>,
 ) -> Result<ServerStatus, String> {
     kill_running(&state);
     let root = backend_root(&app)?;
     let (_, _, exe) = find_installed(&root).ok_or(msg(lang_of(&app), Msg::BackendNotInstalled))?;
-    if preset.model_path.is_empty() {
-        return Err(msg(lang_of(&app), Msg::NoModelSelected));
-    }
-    let args = build_cmdline(preset.clone(), extra_args).await?;
+
+    // Router mode (default): nothing is loaded at launch, models arrive
+    // with the first API call. Falls back to the single-model line only
+    // when the registry is empty (legacy setups, first run).
+    let router_mode = router.as_ref().map(|r| r.is_router()).unwrap_or(false);
+    let (args, model_label) = if router_mode {
+        let cfg = router.as_ref().unwrap();
+        // Validate against the live --help before writing anything: an
+        // unknown key makes llama.cpp exit(1), which we report precisely.
+        let schema = crate::help_parser::fetch_schema(&app).await?;
+        let errs = crate::router::validate(cfg, &schema);
+        if let Some(first) = errs.first() {
+            return Err(msg(
+                lang_of(&app),
+                Msg::PresetRejected(format!("{} ({:?})", first.key, first.reason)),
+            ));
+        }
+        let ini = crate::router::write_preset(&app, cfg)?;
+        (
+            router_to_args(cfg, &preset, &extra_args, &ini),
+            cfg.models
+                .iter()
+                .map(|m| m.alias.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        if preset.model_path.is_empty() {
+            return Err(msg(lang_of(&app), Msg::NoModelSelected));
+        }
+        let mut a = preset_to_args(&preset);
+        for (k, v) in extra_args {
+            a.push(k);
+            if !v.is_empty() {
+                a.push(v);
+            }
+        }
+        (a, preset.model_path.clone())
+    };
+
     let log_dir = crate::state::app_data_dir(&app)?.join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     let log_path = log_dir.join("llama-server.log");
@@ -246,13 +341,27 @@ pub async fn start_server(
         // DETACHED_PROCESS: survive the window + no console.
         cmd.creation_flags(0x00000008 | 0x08000000);
     }
-    let child = cmd.spawn().map_err(|e| msg(lang_of(&app), Msg::LaunchFailed(e.to_string())))?;
+    let mut child = cmd.spawn().map_err(|e| msg(lang_of(&app), Msg::LaunchFailed(e.to_string())))?;
     let pid = child.id();
     let cmdline = format!("{} {}", exe.display(), args.join(" "));
+
+    // A rejected preset makes llama.cpp exit immediately. Give it a beat,
+    // then surface its own message instead of a phantom "running" server.
+    if router_mode {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        if let Ok(Some(status)) = child.try_wait() {
+            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let detail = extract_preset_error(&text).unwrap_or_else(|| {
+                format!("llama-server exited with code {}", status.code().unwrap_or(-1))
+            });
+            return Err(msg(lang_of(&app), Msg::PresetRejected(detail)));
+        }
+    }
+
     *state.0.lock().map_err(|e| e.to_string())? = Some(ServerProc {
         child,
         port: preset.port,
-        model: preset.model_path.clone(),
+        model: model_label.clone(),
         started_at: chrono::Local::now(),
     });
     *state.1.lock().map_err(|e| e.to_string())? = Some(preset.port);
@@ -262,7 +371,7 @@ pub async fn start_server(
     Ok(ServerStatus {
         running: true,
         port: Some(preset.port),
-        model: Some(preset.model_path),
+        model: Some(model_label),
         pid: Some(pid),
         uptime_secs: Some(0),
         cmdline: Some(cmdline),
@@ -449,5 +558,92 @@ mod tests {
         let out = "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       0\n  TCP    127.0.0.1:9090         0.0.0.0:0              LISTENING       42\n";
         assert_eq!(parse_netstat_pid(out, 8080), None);
         assert_eq!(parse_netstat_pid(out, 9090), Some(42));
+    }
+
+    fn router_cfg() -> RouterConfig {
+        RouterConfig {
+            models: vec![crate::router::RouterModel::new("a", "a.gguf")],
+            global: vec![("ctx-size".into(), "4096".into())],
+            models_max: 3,
+            sleep_idle_seconds: 30,
+        }
+    }
+
+    fn flag_val(args: &[String], flag: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    }
+
+    #[test]
+    fn router_args_never_pass_a_model_and_carry_the_routing_knobs() {
+        let p = SimplePreset::default();
+        let ini = std::path::Path::new("C:/cfg/models.ini");
+        let args = router_to_args(&router_cfg(), &p, &HashMap::new(), ini);
+
+        // The whole point of router mode: no model loaded at launch.
+        assert!(!args.contains(&"--model".to_string()));
+        assert!(args.contains(&"--models-preset".to_string()));
+        assert_eq!(
+            flag_val(&args, "--models-preset").as_deref(),
+            Some("C:/cfg/models.ini")
+        );
+        assert_eq!(flag_val(&args, "--models-max").as_deref(), Some("3"));
+        assert_eq!(flag_val(&args, "--sleep-idle-seconds").as_deref(), Some("30"));
+        assert!(args.contains(&"--models-autoload".to_string()));
+        // Stats needs --metrics even in router mode.
+        assert!(args.contains(&"--metrics".to_string()));
+        assert_eq!(flag_val(&args, "--port").as_deref(), Some("8080"));
+    }
+
+    #[test]
+    fn router_args_omit_models_max_when_unlimited() {
+        let mut cfg = router_cfg();
+        cfg.models_max = 0;
+        let args = router_to_args(&cfg, &SimplePreset::default(), &HashMap::new(), std::path::Path::new("m.ini"));
+        assert!(!args.contains(&"--models-max".to_string()));
+    }
+
+    #[test]
+    fn router_args_omit_sleep_when_disabled() {
+        let mut cfg = router_cfg();
+        cfg.sleep_idle_seconds = -1;
+        let args = router_to_args(&cfg, &SimplePreset::default(), &HashMap::new(), std::path::Path::new("m.ini"));
+        assert!(!args.contains(&"--sleep-idle-seconds".to_string()));
+    }
+
+    #[test]
+    fn router_args_append_extra_server_args() {
+        let mut extra = HashMap::new();
+        extra.insert("--api-key".to_string(), "k".to_string());
+        extra.insert("--jinja".to_string(), String::new());
+        let args = router_to_args(&router_cfg(), &SimplePreset::default(), &extra, std::path::Path::new("m.ini"));
+        assert_eq!(flag_val(&args, "--api-key").as_deref(), Some("k"));
+        assert!(args.contains(&"--jinja".to_string()));
+    }
+
+    #[test]
+    fn preset_error_is_extracted_from_the_server_log() {
+        let log = "0.00.043.401 I srv   load_models: Loaded 0 cached model presets\n0.00.046.667 E srv  llama_server: failed to initialize router models: option 'bogus' not recognized in preset 'a'\n";
+        assert_eq!(
+            extract_preset_error(log).as_deref(),
+            Some("option 'bogus' not recognized in preset 'a'")
+        );
+    }
+
+    #[test]
+    fn preset_error_absent_in_a_healthy_log() {
+        let log = "0.00.043.401 I srv   load_models: Loaded 2 custom model presets from C:/x.ini\n[49574] I srv model loaded\n";
+        assert!(extract_preset_error(log).is_none());
+    }
+
+    #[test]
+    fn preset_error_picks_the_last_rejection() {
+        let log = "E srv failed to initialize router models: option 'first' not recognized in preset 'a'\nnoise\nE srv failed to initialize router models: option 'second' not recognized in preset 'b'\n";
+        assert_eq!(
+            extract_preset_error(log).as_deref(),
+            Some("option 'second' not recognized in preset 'b'")
+        );
     }
 }

@@ -11,6 +11,8 @@ export default function StatsPage({ status, stats }: Props) {
   const { activity, error } = stats;
 
   const history = activity?.history ?? [];
+  const models = activity?.models ?? [];
+  const routerOn = activity?.router ?? false;
   const ctxMax = activity?.ctx_max ?? null;
   const ctxUsed = activity?.ctx_used ?? 0;
   const ctxPct = ctxMax && ctxMax > 0 ? Math.min(100, (ctxUsed / ctxMax) * 100) : null;
@@ -25,6 +27,25 @@ export default function StatsPage({ status, stats }: Props) {
         <p className="muted">{t("stats.stoppedNote")}</p>
       ) : (
         <>
+          {routerOn && models.length > 0 && (
+            <div className="row">
+              <span className="muted small">{t("stats.model")}</span>
+              <span className="chip-row">
+                <span className={`chip ${activity?.selected_model ? "on" : ""}`}>{t("stats.modelAuto")}</span>
+                {models.map((m) => (
+                  <span
+                    key={m.alias}
+                    className={`chip m-${m.status} ${activity?.selected_model === m.alias ? "on" : ""}`}
+                    title={t(`router.status.${m.status}`, { alias: m.alias })}
+                  >
+                    {m.alias}
+                  </span>
+                ))}
+              </span>
+              <span className="spacer" />
+              {activity?.selected_model && <span className="muted small">{t("stats.showing", { alias: activity.selected_model })}</span>}
+            </div>
+          )}
           <p className="muted small seclabel">{t("stats.live")}</p>
           <div className="statgrid">
             <div className="stat">
@@ -111,10 +132,11 @@ export default function StatsPage({ status, stats }: Props) {
             ) : (
               <div className="tblscroll">
               <table className="tbl">
-                <thead><tr><th>{t("stats.colTime")}</th><th>{t("stats.colPrompt")}</th><th>{t("stats.colPrefill")}</th><th>{t("stats.colCache")}</th><th>{t("stats.colTtft")}</th><th>{t("stats.colGenerated")}</th><th>{t("stats.colDecode")}</th><th>{t("stats.colSpec")}</th></tr></thead>
+                <thead><tr>{routerOn && <th>{t("stats.colModel")}</th>}<th>{t("stats.colTime")}</th><th>{t("stats.colPrompt")}</th><th>{t("stats.colPrefill")}</th><th>{t("stats.colCache")}</th><th>{t("stats.colTtft")}</th><th>{t("stats.colGenerated")}</th><th>{t("stats.colDecode")}</th><th>{t("stats.colSpec")}</th></tr></thead>
                 <tbody>
                   {[...history].reverse().slice(0, 20).map((s, i) => (
                     <tr key={`${s.at}-${i}`}>
+                      {routerOn && <td className="mono small">{s.model ?? "—"}</td>}
                       <td className="muted small">{new Date(s.at).toLocaleTimeString(loc)}</td>
                       <td>{s.prompt_n ?? "—"}</td>
                       <td>{fmtTps(s.prompt_tps)}</td>

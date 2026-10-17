@@ -120,6 +120,9 @@ export interface SlotLive {
 }
 
 export interface Activity {
+  router: boolean;
+  models: ModelActivity[];
+  selected_model: string | null;
   prefill_tps: number | null;
   decode_tps: number | null;
   avg_prefill_tps: number | null;
@@ -144,8 +147,19 @@ export interface Activity {
   history: TimingSample[];
 }
 
+export interface ModelActivity {
+  alias: string;
+  status: string;
+  active: boolean;
+  prefill_tps: number | null;
+  decode_tps: number | null;
+  ctx_used: number;
+  ctx_max: number | null;
+}
+
 export interface TimingSample {
   at: string;
+  model: string | null;
   prompt_n: number | null;
   prompt_ms: number | null;
   prompt_tps: number | null;
@@ -156,6 +170,54 @@ export interface TimingSample {
   predicted_tps: number | null;
   spec_drafted: number | null;
   spec_accepted: number | null;
+}
+
+/// One model registered in the router (an INI section of the preset).
+export interface RouterModel {
+  alias: string;
+  model_path: string;
+  /// Per-model overrides, `[key, value]` pairs (empty value = bare flag).
+  overrides: [string, string][];
+  load_on_startup: boolean;
+}
+
+export interface RouterConfig {
+  models: RouterModel[];
+  /// `[*]` section: defaults shared by every model.
+  global: [string, string][];
+  models_max: number;
+  sleep_idle_seconds: number;
+}
+
+export type IniErrorKind = "unknownKey" | "routerControlled" | "presetOnly";
+
+export interface IniError {
+  scope: string;
+  key: string;
+  reason: IniErrorKind;
+}
+
+export const EMPTY_ROUTER: RouterConfig = {
+  models: [],
+  global: [],
+  models_max: 4,
+  sleep_idle_seconds: -1,
+};
+
+/// Suggested alias for a GGUF file: short, lowercase, no size/quant noise.
+export function suggestAlias(file: string): string {
+  const base = file.split(/[\\/]/).pop() ?? file;
+  return (
+    base
+      .replace(/\.gguf$/i, "")
+      .replace(/-?\d+(\.\d+)?\s*b\b/gi, "")   // 27B, 9B
+      .replace(/[-_](pq|q)\d[\w.]*$/i, "")      // -PQ2_0, -Q8_0
+      .replace(/[-_](mtp|abliterated|swift-cap|chat|it|instruct)$/i, "")
+      .replace(/[-_]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase()
+      .slice(0, 40) || "model"
+  );
 }
 
 export function fmtSpec(drafted: number | null | undefined, accepted: number | null | undefined): string {
@@ -185,8 +247,11 @@ export const api = {
   deleteModel: (path: string) => invoke<void>("delete_model_file", { path }),
   buildCmdline: (preset: SimplePreset, extraArgs: Record<string, string>) =>
     invoke<string[]>("build_cmdline", { preset, extraArgs }),
-  startServer: (preset: SimplePreset, extraArgs: Record<string, string>) =>
-    invoke<ServerStatus>("start_server", { preset, extraArgs }),
+  startServer: (preset: SimplePreset, extraArgs: Record<string, string>, router: RouterConfig) =>
+    invoke<ServerStatus>("start_server", { preset, extraArgs, router }),
+  routerConfig: () => invoke<RouterConfig>("router_config"),
+  routerValidate: (config: RouterConfig) => invoke<IniError[]>("router_validate", { config }),
+  setRouterConfig: (config: RouterConfig) => invoke<IniError[]>("set_router_config", { config }),
   stopServer: () => invoke<ServerStatus>("stop_server"),
   serverStatus: () => invoke<ServerStatus>("server_status"),
   serverHealth: (port: number) => invoke<unknown>("server_health", { port }),

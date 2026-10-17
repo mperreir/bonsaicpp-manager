@@ -58,8 +58,10 @@ export function useStats(status: ServerStatus) {
       // (Prefill-only phases are brief; the tooltip stays quiet.)
       if (tooltipOnRef.current) {
         const tr = tipRef.current;
+        // Router mode: name the model the speeds belong to.
+        const who = a.router && a.selected_model ? `${a.selected_model} • ` : "";
         const tip = a.decode_tps != null
-          ? `Bonsai • ${
+          ? `${who}Bonsai • ${
             [
               a.prefill_tps != null ? tr("tray.prefill", { tps: a.prefill_tps.toFixed(0) }) : null,
               tr("tray.decode", { tps: a.decode_tps.toFixed(1) }),

@@ -89,6 +89,10 @@ pub enum Msg {
     ZipEntryUnsafe,
     NoModelSelected,
     LaunchFailed(String),
+    /// Router mode: llama-server refused the generated preset.
+    /// Carries the offending detail extracted from its log.
+    PresetRejected(String),
+    RouterNoModel,
     MetricsHint(String),
     MetricsStatus(String),
     ModelsPrefix(String),
@@ -179,6 +183,20 @@ pub fn msg(lang: Lang, m: Msg) -> String {
                 format!("launch failed: {e}")
             } else {
                 format!("lancement : {e}")
+            }
+        }
+        Msg::PresetRejected(e) => {
+            if en {
+                format!("router config rejected: {e}")
+            } else {
+                format!("configuration du routeur refusée : {e}")
+            }
+        }
+        Msg::RouterNoModel => {
+            if en {
+                "no model registered in the router".to_string()
+            } else {
+                "aucun modèle enregistré dans le routeur".to_string()
             }
         }
         Msg::MetricsHint(e) => {

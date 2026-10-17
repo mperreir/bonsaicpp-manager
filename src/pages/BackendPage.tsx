@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { api, fmtBytes, type BackendStatus, type InstalledBackend, type ReleaseInfo, type ServerStatus, type SimplePreset } from "../lib/api";
+import { api, fmtBytes, EMPTY_ROUTER, type BackendStatus, type InstalledBackend, type ReleaseInfo, type ServerStatus, type SimplePreset } from "../lib/api";
 
 export default function BackendPage({ preset, extraArgs, status: server, setServer }: {
   preset: SimplePreset;
@@ -120,8 +120,10 @@ export default function BackendPage({ preset, extraArgs, status: server, setServ
       // default with the current preset.
       if (running) {
         await api.stopServer();
-        if (preset.model_path) {
-          const st = await api.startServer(preset, extraArgs);
+        // Router mode: a new binary can be swapped with nothing loaded.
+        const router = await api.routerConfig().catch(() => EMPTY_ROUTER);
+        if (router.models.length > 0 || preset.model_path) {
+          const st = await api.startServer(preset, extraArgs, router);
           setServer(st);
           setServerRunning(st.running);
         } else {
