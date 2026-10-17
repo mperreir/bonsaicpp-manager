@@ -189,11 +189,13 @@ OpenAI `model` field (or `?model=` on GET endpoints).
 - **Model statuses** (from `GET /models`): `unloaded`, `loading`, `loaded`,
   `sleeping`. `--sleep-idle-seconds` unloads **per instance** (measured);
   `--models-max` evicts LRU (default 4).
-- UI: Server tab opens on **Routeur** — it lists **every** downloaded model
-  with a checkbox (ticked = exposed, with an editable alias + parameters);
-  the Models tab only downloads/deletes, and its "Utiliser" button is shown
-  only when **no** model is routed (i.e. single-model fallback). Settings tab
-  has `models_max` / `sleep_idle_seconds`, Stats tab shows model chips + a
+- UI: the **Router tab** (`RouterPage` + `RouterEditor`) is the single place
+  for routing — it lists **every** downloaded model with a checkbox (ticked
+  = exposed, with an editable alias + parameters) plus `models_max` /
+  `sleep_idle_seconds`. The Server tab keeps Simple + Expert only and shows
+  a `server.routerNote` banner while the router is active; the Models tab
+  only downloads/deletes, and its "Utiliser" button appears only when **no**
+  model is routed (single-model fallback). Stats tab shows model chips + a
   **Modèle** history column, topbar shows a status chip per model.
 - Changing the registry rewrites the INI; the running server keeps the old
   preset until it is restarted (no `?reload=1` in the UI yet).
@@ -307,14 +309,17 @@ OpenAI `model` field (or `?model=` on GET endpoints).
     lang (invisible to the frontend); persisted `lang.txt`, else OS locale
     (`sys-locale`) at startup. Tray tooltip is frontend-built (`useStats`):
     decode active → speeds, else `tray.ready` ("Bonsai prêt").
-18. **Settings tab** (`SettingsPage`): centralizes all user preferences —
-    app autostart at login, server autostart at launch, language (`<select>`
-    over `LOCALES`, extensible), stats polling interval (`bonsai.pollMs`,
-    idle only; 0.5 s while generating), tray tooltip toggle (`bonsai.tooltip`,
-    persisted), and the router knobs (`models_max`, `sleep_idle_seconds`,
-    shown only when at least one model is registered). Nothing
-    settings-like lives in the sidebar footer (removed), the Server tab,
-    or the Stats tab.
+18. **Sidebar order** (`App.tsx`): Backend → Serveur → Modèles → Routeur →
+    Statistiques → Logs → Paramètres → À propos (dependency order: the
+    backend provides the binary, the server runs it, then the models it can
+    serve, then how they are routed).
+19. **Settings tab** (`SettingsPage`): **app** preferences only — autostart
+    at login, server autostart at launch, language (`<select>` over
+    `LOCALES`, extensible), stats polling interval (`bonsai.pollMs`, idle
+    only; 0.5 s while generating), tray tooltip toggle (`bonsai.tooltip`).
+    Router knobs (`models_max`, `sleep_idle_seconds`) live on the **Router**
+    tab, not here. Nothing settings-like lives in the sidebar footer
+    (removed), the Server tab, or the Stats tab.
 20. **Commits**: messages in English, with an `openchamber` co-author trailer:
     `Co-authored-by: OpenChamber`. Applies from `a00f998` onward (earlier
     commits predate the rule and are left untouched).

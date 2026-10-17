@@ -168,9 +168,8 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
       <div className="row">
         <h3>{t("router.title")}</h3>
         <span className="spacer" />
-        <span className="muted small">{t("router.mode", { n: router.models.length })}</span>
+        {routedCount > 0 && <span className="muted small">{t("router.mode", { n: routedCount })}</span>}
       </div>
-      <p className="muted small">{t("router.intro")}</p>
 
       {errs.length > 0 && (
         <div className="alert error">

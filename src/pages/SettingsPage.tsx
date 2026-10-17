@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import i18n, { LOCALES, persistLocale, type AppLocale } from "../i18n";
-import { api, numLocale, type RouterConfig } from "../lib/api";
+import { api, numLocale } from "../lib/api";
 
 interface Props {
   autostart: boolean | null;
@@ -11,20 +11,15 @@ interface Props {
   setPollMs: (ms: number) => void;
   tooltipOn: boolean;
   setTooltipOn: (v: boolean) => void;
-  router: RouterConfig;
-  setRouter: (c: RouterConfig) => void;
 }
 
 const POLL_OPTIONS = [500, 1000, 2000, 5000];
-const MODELS_MAX = [1, 2, 3, 4, 6, 8, 0];
-const SLEEP_IDLE = [-1, 60, 300, 900, 1800];
 
 export default function SettingsPage({
   autostart, onToggleAutostart,
   autoStartServer, setAutoStartServer,
   pollMs, setPollMs,
   tooltipOn, setTooltipOn,
-  router, setRouter,
 }: Props) {
   const { t } = useTranslation();
   const loc = numLocale();
@@ -95,31 +90,6 @@ export default function SettingsPage({
         </label>
       </section>
 
-      {router.models.some((m) => m.routed) && (
-        <section className="card">
-          <h3>{t("router.routing")}</h3>
-          <label className="row">{t("router.modelsMax")}
-            <select value={router.models_max} onChange={(e) => setRouter({ ...router, models_max: Number(e.target.value) })}>
-              {MODELS_MAX.map((v) => (
-                <option key={v} value={v}>
-                  {v === 0 ? t("router.unlimited") : `${v}`}
-                </option>
-              ))}
-            </select>
-            <span className="muted small">{t("router.modelsMaxHelp")}</span>
-          </label>
-          <label className="row">{t("router.sleepIdle")}
-            <select value={router.sleep_idle_seconds} onChange={(e) => setRouter({ ...router, sleep_idle_seconds: Number(e.target.value) })}>
-              {SLEEP_IDLE.map((v) => (
-                <option key={v} value={v}>
-                  {v < 0 ? t("router.never") : `${(v / 60).toLocaleString(loc)} min`}
-                </option>
-              ))}
-            </select>
-            <span className="muted small">{t("router.sleepIdleHelp")}</span>
-          </label>
-        </section>
-      )}
     </div>
   );
 }

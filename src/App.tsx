@@ -6,6 +6,7 @@ import { api, EMPTY_ROUTER, fmtBytes, serverHost, type GpuMemory, type IniError,
 import BackendPage from "./pages/BackendPage";
 import ModelsPage from "./pages/ModelsPage";
 import ServerPage from "./pages/ServerPage";
+import RouterPage from "./pages/RouterPage";
 import SettingsPage from "./pages/SettingsPage";
 import AboutPage from "./pages/AboutPage";
 import StatsPage from "./pages/StatsPage";
@@ -13,7 +14,7 @@ import LogsPage from "./pages/LogsPage";
 import { useStats } from "./hooks/useStats";
 import "./styles.css";
 
-type Tab = "backend" | "modeles" | "serveur" | "stats" | "logs" | "parametres" | "apropos";
+type Tab = "backend" | "serveur" | "modeles" | "routeur" | "stats" | "logs" | "parametres" | "apropos";
 
 const PRESET_KEY = "bonsai.preset";
 const EXTRA_KEY = "bonsai.extraArgs";
@@ -174,6 +175,9 @@ export default function App() {
     }
   };
 
+  /// Router mode is on as soon as one model is exposed.
+  const hasRouter = router.models.some((m) => m.routed);
+
   const toggleServer = async () => {
     if (status.running) {
       setStatus(await api.stopServer());
@@ -186,7 +190,6 @@ export default function App() {
       setTab("modeles");
     }
   };
-  const hasRouter = router.models.some((m) => m.routed);
 
   const openHost = preset.host === "0.0.0.0" ? "localhost" : preset.host;
   const serverUrl =
@@ -206,7 +209,9 @@ export default function App() {
       <aside className="side">
         <div className="brand">Bonsai.cpp Manager</div>
         <nav>
-          {[["backend", t("nav.backend")], ["modeles", t("nav.models")], ["serveur", t("nav.server")], ["stats", t("nav.stats")], ["logs", t("nav.logs")], ["parametres", t("nav.settings")], ["apropos", t("nav.about")]].map(([id, label]) => (
+          {/* Reading order: the backend provides the binary, the server runs
+              it, then the models it can serve, then how they are routed. */}
+          {[["backend", t("nav.backend")], ["serveur", t("nav.server")], ["modeles", t("nav.models")], ["routeur", t("nav.router")], ["stats", t("nav.stats")], ["logs", t("nav.logs")], ["parametres", t("nav.settings")], ["apropos", t("nav.about")]].map(([id, label]) => (
             <button key={id as Tab} className={tab === id ? "active" : ""} onClick={() => setTab(id as Tab)}>{label}</button>
           ))}
         </nav>
@@ -242,7 +247,8 @@ export default function App() {
         <main className="content">
           {tab === "backend" && <BackendPage preset={preset} extraArgs={extraArgs} status={status} setServer={setStatus} />}
           {tab === "modeles" && <ModelsPage selected={preset.model_path} hasRouter={hasRouter} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
-          {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} router={router} saveRouter={saveRouter} setRouter={setRouter} />}
+          {tab === "routeur" && <RouterPage router={router} setRouter={setRouter} saveRouter={saveRouter} />}
+          {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} router={router} />}
           {tab === "stats" && <StatsPage status={status} stats={stats} />}
           {tab === "logs" && <LogsPage status={status} />}
           {tab === "parametres" && (
@@ -255,8 +261,6 @@ export default function App() {
               setPollMs={stats.setPollMs}
               tooltipOn={stats.tooltipOn}
               setTooltipOn={stats.setTooltipOn}
-              router={router}
-              setRouter={setRouter}
             />
           )}
           {tab === "apropos" && <AboutPage />}
