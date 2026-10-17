@@ -248,7 +248,18 @@ OpenAI `model` field (or `?model=` on GET endpoints).
    future stops being `Send` and the build fails with
    `future cannot be sent between threads safely`. `poll_activity` does every
    HTTP call first, then takes the locks for a purely synchronous section.
-10. `shell` tool: commands with `$env:…` or quotes must go through a `.ps1` file
+10. **Never save config on keystroke**: the router config is persisted by the
+    backend, which validates it and rewrites the preset. Free-text fields
+    (`alias`, override values) go through `DeferredInput`, which commits on
+    **blur or Enter** (Escape abandons). Per-keystroke commits froze the
+    field and surfaced half-typed values as errors (an empty alias reads
+    "invalid"). `DeferredInput` keeps the draft in local state and follows
+    external updates only while not focused.
+10b. **`fetch_schema` is cached** (`help_parser::SCHEMA_CACHE`, keyed by the
+    binary path): it spawns `llama-server --help`, which is far too slow to
+    run on every commit. `set_default_backend` invalidates it — a new binary
+    may know options the old one did not.
+10c. `shell` tool: commands with `$env:…` or quotes must go through a `.ps1` file
     (via `write`) run with `powershell -NoProfile -ExecutionPolicy Bypass -File …` —
     inline escaping breaks (e.g. `Select-String` with `|`/`\k`, `-split`/`-match`
     with `"…"`). `Get-Content …log | Select-String`: prefer

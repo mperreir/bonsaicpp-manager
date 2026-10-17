@@ -17,6 +17,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelpOption {
@@ -359,13 +360,41 @@ pub fn parse_help(text: &str) -> HelpSchema {
 }
 
 /// Tauri command: run `<exe> --help` and return the parsed schema.
-/// Run `llama-server --help` on the installed backend and parse it.
+/// Cache of the last parsed `--help`, keyed by the binary it came from.
+/// Running `llama-server --help` costs a process spawn (hundreds of ms on
+/// a cold binary), and the router editor validates on every keystroke it
+/// commits — without this, typing an alias froze the field. A backend
+/// update changes the path, which misses the cache automatically.
+static SCHEMA_CACHE: OnceLock<Mutex<Option<(std::path::PathBuf, HelpSchema)>>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<Option<(std::path::PathBuf, HelpSchema)>> {
+    SCHEMA_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Drop the cached schema (after a backend install/switch).
+pub fn invalidate_schema_cache() {
+    if let Ok(mut g) = cache().lock() {
+        *g = None;
+    }
+}
+
+/// Run `llama-server --help` on the installed backend and parse it, reusing
+/// the cached result while the binary is unchanged.
 pub async fn fetch_schema(app: &tauri::AppHandle) -> Result<HelpSchema, String> {
     use crate::backend::find_installed;
     use crate::locale::{lang_of, msg, Msg};
     use crate::state::backend_root;
     let root = backend_root(app)?;
     let (_, _, exe) = find_installed(&root).ok_or(msg(lang_of(app), Msg::BackendNotInstalled))?;
+
+    if let Ok(g) = cache().lock() {
+        if let Some((path, schema)) = g.as_ref() {
+            if *path == exe {
+                return Ok(schema.clone());
+            }
+        }
+    }
+
     // No console flash in release (tokio::process::Command has creation_flags()).
     let mut help_cmd = tokio::process::Command::new(&exe);
     #[cfg(windows)]
@@ -382,7 +411,11 @@ pub async fn fetch_schema(app: &tauri::AppHandle) -> Result<HelpSchema, String> 
     if text.trim().is_empty() {
         return Err("le binaire n'a renvoye aucune aide".to_string());
     }
-    Ok(parse_help(&text))
+    let schema = parse_help(&text);
+    if let Ok(mut g) = cache().lock() {
+        *g = Some((exe, schema.clone()));
+    }
+    Ok(schema)
 }
 
 #[tauri::command]

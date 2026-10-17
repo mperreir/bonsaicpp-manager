@@ -306,6 +306,9 @@ pub async fn set_default_backend(
         return Err(msg(lang_of(&app), Msg::BackendTagNotInstalled { tag, flavor }));
     }
     write_default(&root, &tag, &flavor)?;
+    // The router validates against `--help`: the new binary may know options
+    // the old one did not (and vice versa).
+    crate::help_parser::invalidate_schema_cache();
     list_installed_backends(app).await
 }
 

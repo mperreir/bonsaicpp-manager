@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  api, suggestAlias,
+  api, sanitizeAlias, suggestAlias,
   type HelpOption, type HelpSchema, type IniError, type LocalModel,
   type RouterConfig, type RouterModel,
 } from "../lib/api";
+import DeferredInput from "./DeferredInput";
 
 interface Props {
   router: RouterConfig;
@@ -122,11 +123,11 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
                     />
                   </label>
                 ) : (
-                  <input
+                  <DeferredInput
                     type={kind === "int" || kind === "float" ? "number" : "text"}
                     placeholder={opt?.default ?? ""}
                     value={v}
-                    onChange={(e) => set(setPair(pairs, k, e.target.value))}
+                    onCommit={(nv) => set(setPair(pairs, k, nv))}
                   />
                 )}
               </td>
@@ -220,11 +221,14 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
                 />
                 {on && entry ? (
                   <>
-                    <input
-                      className="mono"
+                    <DeferredInput
+                      className="mono alias"
                       value={entry.alias}
                       title={t("router.aliasTitle")}
-                      onChange={(e) => patchModel(entry.alias, { alias: e.target.value })}
+                      onCommit={(v) => {
+                        const clean = sanitizeAlias(v) || entry.alias;
+                        if (clean !== entry.alias) patchModel(entry.alias, { alias: clean });
+                      }}
                     />
                     <span className="muted small mono ellipsis" title={file.file}>
                       {file.file.split(/[\\/]/).pop()}

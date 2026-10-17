@@ -135,6 +135,7 @@ table.kv td:first-child { color: var(--muted); white-space: nowrap; }
 .chip.m-sleeping { color: var(--muted); opacity: .8; }
 .chip.m-unloaded { color: var(--muted); }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30ch; }
+input.alias { width: 140px; }
 .router-model { border-top: 1px solid var(--border); padding: 8px 0; }
 .router-model:first-of-type { border-top: 0; }
 .alert { padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; }

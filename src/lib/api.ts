@@ -222,6 +222,19 @@ export function suggestAlias(file: string): string {
   );
 }
 
+/// Normalize a hand-typed alias: the name is an INI section name and the
+/// value clients send in `"model"`, so whitespace and the few characters
+/// that would break either are folded to `-` rather than rejected.
+export function sanitizeAlias(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[[\]\r\n]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
 export function fmtSpec(drafted: number | null | undefined, accepted: number | null | undefined): string {
   if (drafted == null || accepted == null || drafted <= 0) return "—";
   return `${((accepted / drafted) * 100).toFixed(0)} %`;
