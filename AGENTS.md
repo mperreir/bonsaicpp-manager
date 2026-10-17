@@ -21,7 +21,8 @@ fork (Bonsai 2 models). See `README.md` for usage.
 npm install
 npm run tauri dev      # vite :1420 + auto rebuild of the binary; closing the window = hide to tray
 npm run build          # tsc + prod vite
-cd src-tauri; cargo test --lib   # unit tests (--help parser)
+cd src-tauri; cargo test --lib   # unit tests (--help parser, router INI, stats)
+cd src-tauri; cargo test --test router_preset -- --ignored   # real llama-server on the generated INI
 cd src-tauri; cargo check
 ```
 
@@ -44,7 +45,8 @@ A ghost tray icon after kill is normal (Explorer cache, disappears on hover).
   `server_cmd.rs` (`llama-server` supervision, forced `--metrics`; `server_status`
   **adopts** an orphan server answering on the last known port; `stop_server`
   also kills the `llama-server.exe` orphan via taskkill after checking its name),
-  `stats.rs` (see § Stats), `state.rs` (paths + server state + last port).
+  `stats.rs` is a **directory** `stats/` — see § Stats (module tree) —,
+  `state.rs` (paths + server state + last port).
 - `src/`: `App.tsx` (sidebar shell, `localStorage` presets), `lib/api.ts` (`invoke`
   wrappers + types), `hooks/useStats.ts` (App-level polling: survives tab switches
   and tray hiding — NEVER poll from a page),
@@ -53,6 +55,30 @@ A ghost tray icon after kill is normal (Explorer cache, disappears on hover).
   `bin/`, `models/bonsai2-gguf/`, `logs/llama-server.log`.
 
 ## Stats (rewritten 2026-10-10, 6-point user spec)
+
+**Module tree** (`src-tauri/src/stats/`, split from a 2000-line `stats.rs`
+on 2026-10-17). One concern per file, tests in `tests.rs`:
+
+| file | concern |
+|---|---|
+| `types.rs` | `TimingSample`, `StatsState`, `PollAvg`, `SimpleTrack`, `PrevSlot`, `Pending`, `Ctr`, `Activity`, `ModelActivity`, `ModelOut` |
+| `prom.rs` | `/metrics` Prometheus parsing (`parse_metric`, `read_ctrs`) + the `scrape_metrics` command |
+| `rate.rs` | sliding-window maths, pure (`window_rate`, `hold_or_stale`, `prefill_over`, `WIN_SECS`) |
+| `log.rs` | server log parsing, attributed per instance (`lookup_log_timings`, `parse_model_ports`) |
+| `sample.rs` | one finished-request sample (`close_sample`, `with_counters`, `finish_sample`, history) |
+| `endpoint.rs` | router HTTP layer (`is_router`, `fetch_model`, `urlencode`, `parse_models_list`) |
+| `poll.rs` | `poll_model`: the live-tracking algorithm, for **one** model |
+| `activity.rs` | `poll_activity`: the command, drives `poll` per model |
+| `cmds.rs` | `record_timing`, `send_test_prompt`, `set_tray_tooltip` |
+| `tests.rs` | all 60 unit tests (they cross modules — a poll asserts on the sample *and* the history it wrote) |
+
+- Unit tests stay in-module (`#[cfg(test)] mod tests`) or in `tests.rs`:
+  they exercise **private** helpers, which an integration test in `tests/`
+  cannot reach. `tests/router_preset.rs` is the one real integration test
+  (it launches the installed `llama-server` on the generated INI, `#[ignore]`).
+- `pub mod` only on `activity`, `cmds`, `prom` (they hold
+  `#[tauri::command]`s that `generate_handler!` resolves by path) and on
+  `router` (so the integration test can call `render_ini`).
 
 - **Live**: per-slot `/slots` snapshots over a 10 s sliding window
   (`window_rate`, needs ≥ 1 s span), summed over active slots

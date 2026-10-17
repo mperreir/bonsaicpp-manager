@@ -3,7 +3,7 @@ mod gpu;
 mod help_parser;
 mod locale;
 mod models;
-mod router;
+pub mod router;
 mod server_cmd;
 mod state;
 mod stats;
@@ -243,11 +243,11 @@ pub fn run() {
             server_cmd::server_status,
             server_cmd::server_health,
             server_cmd::server_log_tail,
-            stats::scrape_metrics,
-            stats::poll_activity,
-            stats::send_test_prompt,
-            stats::record_timing,
-            stats::set_tray_tooltip,
+            stats::prom::scrape_metrics,
+            stats::activity::poll_activity,
+            stats::cmds::send_test_prompt,
+            stats::cmds::record_timing,
+            stats::cmds::set_tray_tooltip,
             gpu::gpu_memory,
             about_info,
             get_autostart,

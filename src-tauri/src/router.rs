@@ -564,27 +564,4 @@ mod tests {
             .expect("ctx-size parsed");
         assert_eq!(ctx.kind, OptionKind::Int);
     }
-
-    /// Writes a realistic preset to `target/router-e2e.ini` so the real
-    /// `llama-server --models-preset` can be pointed at it (an unknown key
-    /// makes the binary exit(1), so the generated text is only trusted
-    /// once the binary has accepted it).
-    #[test]
-    #[ignore = "manual end-to-end check against llama-server"]
-    fn dump_generated_ini_for_e2e() {
-        let mut cfg = cfg_with(&[("--flash-attn", "true"), ("--ctx-size", "4096"), ("--n-gpu-layers", "0")]);
-        let mut m9 = RouterModel::new("t9b", "MODEL_9B");
-        m9.overrides = vec![("ctx-size".into(), "2048".into())];
-        let mut m27 = RouterModel::new("t27b", "MODEL_27B");
-        m27.load_on_startup = true;
-        m27.overrides = vec![("ctx-size".into(), "8192".into()), ("--n-gpu-layers".into(), "0".into())];
-        cfg.models.push(m9);
-        cfg.models.push(m27);
-        let ini = cfg.render_ini();
-        let out = std::path::Path::new("target").join("router-e2e.ini");
-        std::fs::write(&out, &ini).unwrap();
-        println!("---BEGIN INI---");
-        println!("{ini}");
-        println!("---END INI---");
-    }
 }
