@@ -28,7 +28,7 @@
 // resolves `stats::cmds::send_test_prompt` and needs the path reachable.
 pub mod activity;
 pub mod cmds;
-mod endpoint;
+pub(crate) mod endpoint;
 mod log;
 mod poll;
 pub mod prom;

@@ -267,6 +267,7 @@ export const api = {
   routerConfig: () => invoke<RouterConfig>("router_config"),
   routerValidate: (config: RouterConfig) => invoke<IniError[]>("router_validate", { config }),
   setRouterConfig: (config: RouterConfig) => invoke<IniError[]>("set_router_config", { config }),
+  reloadRouter: (port: number) => invoke<[string, string][]>("reload_router_models", { port }),
   stopServer: () => invoke<ServerStatus>("stop_server"),
   serverStatus: () => invoke<ServerStatus>("server_status"),
   serverHealth: (port: number) => invoke<unknown>("server_health", { port }),

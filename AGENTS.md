@@ -197,8 +197,17 @@ OpenAI `model` field (or `?model=` on GET endpoints).
   only downloads/deletes, and its "Utiliser" button appears only when **no**
   model is routed (single-model fallback). Stats tab shows model chips + a
   **Modèle** history column, topbar shows a status chip per model.
-- Changing the registry rewrites the INI; the running server keeps the old
-  preset until it is restarted (no `?reload=1` in the UI yet).
+- **Hot reload vs restart**: everything written in the preset (exposure,
+  aliases, per-model overrides, `load-on-startup`, `[*]` defaults) is applied
+  to a **running** router by `GET /models?reload=1` — measured on
+  `prism-b10772`: it re-reads the INI, renames/adds/removes sections and
+  **unloads** models whose source changed
+  (`load_models: (reload) unloading model name=alpha (source updated or removed)`).
+  `RouterEditor.apply` calls `reload_router_models` after every accepted
+  save, so an alias edit is served under its new name on the next request.
+  `--models-max` / `--sleep-idle-seconds` are router-owned **CLI flags** and
+  need a real restart: `RouterPage` shows `router.cliRestartNeeded` plus a
+  restart button.
 
 - **Windows autostart**: `get_autostart`/`set_autostart` commands (`lib.rs`,
   `ManagerExt::autolaunch`), checkbox in the Settings tab (`SettingsPage`); the plugin is

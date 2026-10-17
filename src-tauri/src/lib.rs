@@ -233,6 +233,7 @@ pub fn run() {
             router::router_config,
             router::router_validate,
             router::set_router_config,
+            router::reload_router_models,
             models::list_local_models,
             models::list_remote_files,
             models::download_model_file,

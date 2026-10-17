@@ -178,6 +178,14 @@ export default function App() {
   /// Router mode is on as soon as one model is exposed.
   const hasRouter = router.models.some((m) => m.routed);
 
+  /// Stop then start with the current configuration. Used after a change
+  /// that only a restart can apply (the router's own CLI flags).
+  const restartServer = async () => {
+    await api.stopServer();
+    const cfg = hasRouter ? router : EMPTY_ROUTER;
+    setStatus(await api.startServer(preset, extraArgs, cfg));
+  };
+
   const toggleServer = async () => {
     if (status.running) {
       setStatus(await api.stopServer());
@@ -247,7 +255,15 @@ export default function App() {
         <main className="content">
           {tab === "backend" && <BackendPage preset={preset} extraArgs={extraArgs} status={status} setServer={setStatus} />}
           {tab === "modeles" && <ModelsPage selected={preset.model_path} hasRouter={hasRouter} onSelect={(p) => { setPreset({ ...preset, model_path: p }); setTab("serveur"); }} />}
-          {tab === "routeur" && <RouterPage router={router} setRouter={setRouter} saveRouter={saveRouter} />}
+          {tab === "routeur" && (
+            <RouterPage
+              router={router}
+              setRouter={setRouter}
+              saveRouter={saveRouter}
+              status={status}
+              onRestart={restartServer}
+            />
+          )}
           {tab === "serveur" && <ServerPage preset={preset} setPreset={setPreset} extraArgs={extraArgs} setExtraArgs={setExtraArgs} status={status} setStatus={setStatus} router={router} />}
           {tab === "stats" && <StatsPage status={status} stats={stats} />}
           {tab === "logs" && <LogsPage status={status} />}

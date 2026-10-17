@@ -13,6 +13,10 @@ interface Props {
   /// Persist through the backend (validates against `--help`, writes the
   /// INI). Returns the list of rejected keys.
   saveRouter: (c: RouterConfig) => Promise<IniError[]>;
+  /// Port of the running server, or null when it is stopped. Everything in
+  /// the preset is applied live through `GET /models?reload=1`, so a running
+  /// router does not need a restart.
+  serverPort: number | null;
 }
 
 /// Keys the router owns: in the preset they are overwritten by the server
@@ -33,7 +37,7 @@ function kindOf(o: HelpOption): string {
   return Object.keys(o.kind)[0] ?? "text";
 }
 
-export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
+export default function RouterEditor({ router, setRouter, saveRouter, serverPort }: Props) {
   const { t } = useTranslation();
   const [schema, setSchema] = useState<HelpSchema | null>(null);
   const [local, setLocal] = useState<LocalModel[]>([]);
@@ -65,7 +69,13 @@ export default function RouterEditor({ router, setRouter, saveRouter }: Props) {
     setRouter(next);
     setBusy(true);
     try {
-      setErrs(await saveRouter(next));
+      const rejected = await saveRouter(next);
+      setErrs(rejected);
+      // The preset is what we just wrote: hand it to the running router
+      // instead of making the user restart the server for an alias edit.
+      if (rejected.length === 0 && serverPort != null) {
+        await api.reloadRouter(serverPort).catch(() => {});
+      }
     } catch (e) {
       console.error(e);
       setErrs([]);

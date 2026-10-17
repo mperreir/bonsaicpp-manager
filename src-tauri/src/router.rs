@@ -423,6 +423,41 @@ pub async fn set_router_config(
     Ok(errs)
 }
 
+/// Apply the freshly written preset to a **running** router, without a
+/// restart.
+///
+/// Measured on `prism-b10772`: after rewriting the INI,
+/// `GET /models?reload=1` re-reads it and
+/// - adds / removes / renames the sections,
+/// - **unloads** a model whose source changed or disappeared
+///   (`load_models: (reload) unloading model name=alpha (source updated or removed)`),
+///
+/// so an alias edit is served under the new alias on the very next request,
+/// with no restart. That covers everything written in the preset: exposure,
+/// aliases, per-model overrides, `load-on-startup` and the `[*]` defaults.
+///
+/// It does **not** cover `--models-max` / `--sleep-idle-seconds`: those are
+/// command-line flags owned by the router, so they need a real restart (the
+/// UI says so).
+#[tauri::command]
+pub async fn reload_router_models(port: u16) -> Result<Vec<(String, String)>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = client
+        .get(format!("http://127.0.0.1:{port}/models?reload=1"))
+        .send()
+        .await
+        .map_err(|e| format!("/models?reload=1: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("/models?reload=1 statut: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("/models?reload=1 JSON: {e}"))?;
+    Ok(crate::stats::endpoint::parse_models_list(&v))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
